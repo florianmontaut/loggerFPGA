@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>592</width>
+    <height>646</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>MainWindow</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QGridLayout" name="gridLayout">
+    <item row="0" column="0">
+     <widget class="ParameterTree" name="settingsTree">
+      <attribute name="headerVisible">
+       <bool>false</bool>
+      </attribute>
+      <column>
+       <property name="text">
+        <string notr="true">1</string>
+       </property>
+      </column>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+  <widget class="QMenuBar" name="menuBar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>592</width>
+     <height>22</height>
+    </rect>
+   </property>
+   <widget class="QMenu" name="menuSave">
+    <property name="title">
+     <string>Menu</string>
+    </property>
+    <addaction name="actionSave_settings"/>
+    <addaction name="actionLoad_settings"/>
+   </widget>
+   <addaction name="menuSave"/>
+  </widget>
+  <widget class="QStatusBar" name="statusBar"/>
+  <action name="actionSave_settings">
+   <property name="text">
+    <string>Save settings</string>
+   </property>
+  </action>
+  <action name="actionLoad_settings">
+   <property name="text">
+    <string>Load settings</string>
+   </property>
+  </action>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>ParameterTree</class>
+   <extends>QTreeWidget</extends>
+   <header>pyqtgraph.parametertree</header>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>
