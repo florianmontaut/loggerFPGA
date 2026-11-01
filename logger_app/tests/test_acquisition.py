@@ -99,3 +99,24 @@ def test_recording_csv(app, tmp_path):
     table = np.loadtxt(tmp_path / files[0], delimiter=",", skiprows=1)
     assert table.shape == (8192, 1 + 1 + 16)
     np.testing.assert_allclose(table[:, 1], frames[0].analog[:, 0], rtol=1e-6)
+
+
+class ImmediateTripSimulator(FpgaSimulator):
+    """Disjonction déclenchée dès la réception de la configuration (pendant `tempo`)."""
+
+    def _on_message(self, msg):
+        super()._on_message(msg)
+        if msg[:2] == bytes([0x80, 0x00]):
+            self.next_trip = 0.0
+
+
+def test_trigger_during_tempo_is_not_lost(app, monkeypatch):
+    import tools.fpga_simulator as simulator
+    monkeypatch.setattr(simulator, "FpgaSimulator", ImmediateTripSimulator)
+    monkeypatch.setitem(globals(), "FpgaSimulator", ImmediateTripSimulator)
+    # diviseur élevé : tempo = 16384 x 2000 / 25 MHz + 1 ms = 1,3 s, trig reçu pendant ce temps
+    worker, sim, frames, errors, _ = run_acquisition(
+        app, dict(signals=[0], trigger=TriggerType.TRIP, divider=2000, max_frames=1),
+        timeout=8)
+    assert not errors
+    assert len(frames) == 1

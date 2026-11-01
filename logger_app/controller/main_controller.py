@@ -7,6 +7,7 @@ Relie la vue et les contrôleurs (rôle du MainController du GLviewer) :
     AcquisitionController ──frame_ready──> LiveGraphController.on_frame
     LiveGraphController ──cursor_values──> ChannelTreeController.set_values
     ChannelTreeController ──visibility_changed──> LiveGraphController.set_visible
+    AcquisitionController ──frame_ready──> FFTController.on_frame (spectre, si FFT activée)
 
 La dernière configuration est conservée entre deux sessions (fichier JSON dans le dossier de
 configuration de l'utilisateur).
@@ -20,6 +21,7 @@ from PyQt6 import QtCore, QtWidgets
 from controller.acquisition_controller import AcquisitionController
 from controller.channel_tree_controller import ChannelTreeController
 from controller.config_controller import ConfigController
+from controller.fft_controller import FFTController
 from controller.graph_controller import LiveGraphController
 from model.config import ConfigError, LoggerConfig
 from view.main_window import MainWindow
@@ -47,6 +49,7 @@ class MainController(QtCore.QObject):
         self.config_ctrl = ConfigController(view.configtree, cfg)
         self.tree_ctrl = ChannelTreeController(view.treechannels)
         self.graph_ctrl = LiveGraphController(view.maingraph)
+        self.fft_ctrl = FFTController(view.fftgraph, view.configtree)
         self.acq_ctrl = AcquisitionController()
 
         self._connect()
@@ -82,6 +85,14 @@ class MainController(QtCore.QObject):
         self.graph_ctrl.fps_changed.connect(lambda fps: v.fpsLabel.setText(f"{fps:.0f} img/s"))
         self.tree_ctrl.visibility_changed.connect(self.graph_ctrl.set_visible)
 
+        # FFT : mêmes trames, même pause, mêmes voies visibles que le graphique temporel
+        v.actionFFT.toggled.connect(self.fft_ctrl.set_enabled)
+        v.actionResetFFT.triggered.connect(self.fft_ctrl.reset)
+        v.actionPause.toggled.connect(self.fft_ctrl.set_paused)
+        self.acq_ctrl.frame_ready.connect(self.fft_ctrl.on_frame)
+        self.tree_ctrl.visibility_changed.connect(self.fft_ctrl.set_visible)
+        self.tree_ctrl.channel_selected.connect(self.fft_ctrl.select_channel)
+
     # ------------------------------------------------------------------ acquisition
     def start(self, single: bool = False):
         try:
@@ -105,6 +116,7 @@ class MainController(QtCore.QObject):
             return
         self.tree_ctrl.build(cfg)
         self.graph_ctrl.configure(cfg)
+        self.fft_ctrl.configure(cfg)
 
     def _on_stats(self, stats: dict):
         self.view.framesLabel.setText(f"Trames : {stats['frames']}")

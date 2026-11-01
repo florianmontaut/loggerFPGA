@@ -77,13 +77,15 @@ logger_app/
 ├── model/
 │   ├── config.py                  LoggerConfig : paramètres, validation, JSON (ancien format accepté)
 │   ├── protocol.py                trames UDP (construction / décodage), Frame
-│   └── recorder.py                enregistrement d'une trame (csv : temps + une colonne par voie, npz)
+│   ├── recorder.py                enregistrement d'une trame (csv : temps + une colonne par voie, npz)
+│   └── spectrum.py                FFT : fenêtres, amplitudes calibrées, moyennage, pics, THD
 ├── controller/
 │   ├── udp_worker.py              AcquisitionWorker(QThread) : boucle de logger.m
 │   ├── acquisition_controller.py  démarrage / arrêt / relance du worker
 │   ├── config_controller.py       ParameterTree <-> LoggerConfig (voie de seuil, grandeurs dérivées)
 │   ├── channel_tree_controller.py arborescence des voies (visibilité, valeur sous le curseur)
 │   ├── graph_controller.py        graphique temps réel (analogique + logique, seuil, curseur)
+│   ├── fft_controller.py          spectre temps réel et réglages FFT
 │   └── main_controller.py         câblage des contrôleurs et de la vue
 ├── view/main_window.py            fenêtre : barre d'outils, arbre, paramètres, graphique, barre d'état
 ├── ressources/pens.py             couleurs des voies (palette tab20 du GLviewer)
@@ -141,6 +143,39 @@ Graphique : un double-clic place le curseur vertical. La colonne *Valeur* de
 l'arborescence donne alors la valeur de chaque voie sous le curseur (sans curseur : le
 dernier point de la trame). Les cases à cocher masquent ou affichent les courbes.
 
+### FFT
+
+Le bouton **FFT** (F9) affiche le spectre des voies analogiques sous le graphique
+temporel. Il est calculé à chaque trame reçue, pour que le moyennage porte sur toutes les
+trames et pas seulement sur celles qui sont dessinées. Réglages dans le groupe *FFT* de
+l'arbre des paramètres :
+
+| Réglage | Choix |
+|---|---|
+| Fenêtre | rectangulaire, hann, hamming, blackman, blackman-harris, flattop (amplitudes exactes même entre deux raies) |
+| Retirer le continu | soustrait la moyenne de la trame avant la FFT |
+| Échelle | amplitude crête, efficace, ou dB (réf. 1 unité crête) |
+| Moyennage | aucun, moyenne des puissances des N dernières trames, maximum ; *Remise à zéro FFT* recommence |
+| Fréquence max, fréquences en log | zone affichée |
+| Voie analysée | voie des mesures ; un clic sur une voie de l'arborescence la sélectionne aussi |
+| Pics repérés, harmoniques | nombre de pics marqués (20 dB au moins au-dessus du bruit), harmoniques prises dans le THD |
+
+*Mesures* (lecture seule) : résolution et bande équivalente de bruit, nombre de trames
+moyennées, fondamental (fréquence affinée par interpolation, amplitude), THD et liste des
+pics. La valeur sous la souris est affichée au-dessus du spectre. *Figer* et les cases de
+l'arborescence s'appliquent aussi au spectre.
+
+Repris du GLviewer (`model/analysis/fft.py`) : le principe fenêtre + demi-spectre. Son
+code dépend de son modèle (`AnalysisNode`, `DerivedSignalObject`) et ne calibre pas les
+amplitudes, d'où le module autonome `model/spectrum.py`. Ce module pourrait en retour
+servir au GLviewer.
+
+La résolution vaut fréquence d'échantillonnage / points par voie : pour séparer des
+composantes à 50 Hz, augmenter le diviseur (par exemple 500, soit 50 kHz, donne 12 Hz
+avec 4 voies).
+
+![FFT](docs/capture_fft.png)
+
 ### Sans carte : simulateur
 
 ```bash
@@ -159,7 +194,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-27 tests : protocole (octet par octet contre `logger.m`), acquisition complète contre le
+43 tests : protocole (octet par octet contre `logger.m`), FFT, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes

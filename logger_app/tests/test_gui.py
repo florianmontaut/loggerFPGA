@@ -111,3 +111,45 @@ def test_invalid_config_message(setup):
     p = ctrl.config_ctrl.p
     p("Voies", "Voie 2").setValue(1)                       # doublon avec la voie 1
     assert "plusieurs fois" in window.statusBar().currentMessage()
+
+
+def test_fft_panel(setup):
+    """Simulateur : la voie s est une sinusoïde à 50 x (s + 1) Hz."""
+    qapp, sim, window, ctrl = setup
+    ctrl.config_ctrl.p("Échantillonnage", "Diviseur").setValue(500)     # 50 kHz
+    fft = ctrl.fft_ctrl
+    assert not window.fftgraph.isVisible()
+    window.actionFFT.setChecked(True)
+    assert window.fftgraph.isVisible()
+    fft.p("Moyennage").setValue("moyenne")
+    fft.p("Nombre de trames").setValue(3)
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: fft.averager.n_averaged >= 3, 15)
+    wait(qapp, lambda: False, 0.2)
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+
+    # voie analysée par défaut : la première (voie 1 -> 100 Hz)
+    fundamental = fft.p("Mesures", "Fondamental").value()
+    assert fundamental.startswith("1") and "Hz" in fundamental
+    peaks = {round(f, -1) for f in _peak_freqs(fft, 1)}
+    assert 100 in peaks
+    # clic sur la voie 6 dans l'arborescence -> voie analysée, fondamental à 350 Hz
+    ctrl.tree_ctrl.view.setCurrentIndex(ctrl.tree_ctrl.items[("A", 6)][0].index())
+    assert fft.p("Voie analysée").value() == 6
+    assert abs(_peak_freqs(fft, 6)[0] - 350) < 15
+    assert fft.p("Mesures", "Trames moyennées").value() == "3"
+    # échelle dB : les courbes sont redessinées en dB
+    fft.p("Échelle").setValue("dB")
+    wait(qapp, lambda: False, 0.1)
+    y = fft.curves[6].getData()[1]
+    assert y.max() < 60 and y.min() >= -200
+    window.grab().save(str(SHOTS / "logger_fft.png"))
+
+
+def _peak_freqs(fft, sig):
+    from model import spectrum
+    j = fft.signals.index(sig)
+    return [p.frequency for p in spectrum.find_peaks(fft.freq, fft.amp[:, j], 3,
+                                                     fft.p("Fenêtre").value(),
+                                                     min_frequency=fft.freq[1])]

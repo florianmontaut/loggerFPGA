@@ -62,6 +62,10 @@ class AcquisitionWorker(QtCore.QThread):
         recorder = FrameRecorder(cfg, cfg.record_format) if cfg.record else None
         try:
             self._open()
+            # datagrammes restés d'une session précédente : vidés AVANT la configuration.
+            # Après, le logger est armé (trigger disjonction / seuil) et peut se déclencher
+            # pendant la pause `tempo` : son TRIG_MSG ne doit pas être perdu.
+            self._flush()
             self.state_changed.emit("CONFIG")
             self.status.emit(f"Configuration du logger {cfg.ip_fpga}")
             self._send(protocol.PORT_MSG, cfg.port_cmd)
@@ -70,7 +74,6 @@ class AcquisitionWorker(QtCore.QThread):
             self._send(protocol.build_config_msg(cfg))
             if self._sleep(cfg.tempo):
                 return
-            self._flush()
 
             while not self.stopping and not self._frames_done():
                 if cfg.trigger_type == cfg.trigger_type.AUTO:
