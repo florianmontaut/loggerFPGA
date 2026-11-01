@@ -29,6 +29,7 @@ class LiveGraphController(QtCore.QObject):
 
     cursor_values = QtCore.pyqtSignal(dict)    # clé -> valeur sous le curseur
     fps_changed = QtCore.pyqtSignal(float)
+    redrawn = QtCore.pyqtSignal()              # nouvelle trame dessinée (mesures à refaire)
 
     REFRESH_HZ = 30
     LOGIC_HEIGHT = 0.8
@@ -173,6 +174,7 @@ class LiveGraphController(QtCore.QObject):
         mo = frame.index * frame.raw.size * 2 / 1048576
         self.analog_plot.setTitle(f"Trame {frame.index}  -  {mo:.2f} Mo")
         self._emit_cursor_values()
+        self.redrawn.emit()
         self._count_fps()
 
     def _count_fps(self):

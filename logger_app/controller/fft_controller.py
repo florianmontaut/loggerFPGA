@@ -97,6 +97,11 @@ class FFTController(QtCore.QObject):
     def p(self, *path):
         return self.params.child(*path)
 
+    def _signal(self) -> int | None:
+        """Voie analysée (indice), None tant qu'aucune voie analogique n'est choisie."""
+        sig = self.p("Voie analysée").value()
+        return sig if isinstance(sig, int) else None
+
     # ------------------------------------------------------------------ configuration
     def configure(self, cfg: LoggerConfig):
         self.cfg = cfg
@@ -215,7 +220,7 @@ class FFTController(QtCore.QObject):
     def _update_labels(self):
         if self.cfg is None:
             return
-        sig = self.p("Voie analysée").value()
+        sig = self._signal()
         unit = self.cfg.unit(sig) if sig is not None else ""
         scale = self.p("Échelle").value()
         label = {"crête": "Amplitude crête", "efficace": "Amplitude efficace",
@@ -232,7 +237,7 @@ class FFTController(QtCore.QObject):
         self.peak_labels.clear()
 
     def _update_measures(self):
-        sig = self.p("Voie analysée").value()
+        sig = self._signal()
         self._clear_peaks()
         n_avg = self.averager.n_averaged
         mode = self.p("Moyennage").value()
@@ -279,7 +284,7 @@ class FFTController(QtCore.QObject):
         x = self.plot.vb.mapSceneToView(pos).x()
         f = 10 ** x if self.p("Fréquences en log").value() else x
         i = int(np.clip(round(f / (self.freq[1] - self.freq[0])), 0, self.freq.size - 1))
-        sig = self.p("Voie analysée").value()
+        sig = self._signal()
         if sig not in self.signals:
             return
         value = self._scaled(self.amp[:, self.signals.index(sig)])[i]

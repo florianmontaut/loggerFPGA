@@ -78,7 +78,8 @@ logger_app/
 │   ├── config.py                  LoggerConfig : paramètres, validation, JSON (ancien format accepté)
 │   ├── protocol.py                trames UDP (construction / décodage), Frame
 │   ├── recorder.py                enregistrement d'une trame (csv : temps + une colonne par voie, npz)
-│   └── spectrum.py                FFT : fenêtres, amplitudes calibrées, moyennage, pics, THD
+│   ├── spectrum.py                FFT : fenêtres, amplitudes calibrées, moyennage, pics, THD
+│   └── measures.py                mesures entre deux curseurs (Δt, Δy, min, max, moyenne, efficace)
 ├── controller/
 │   ├── udp_worker.py              AcquisitionWorker(QThread) : boucle de logger.m
 │   ├── acquisition_controller.py  démarrage / arrêt / relance du worker
@@ -86,6 +87,7 @@ logger_app/
 │   ├── channel_tree_controller.py arborescence des voies (visibilité, valeur sous le curseur)
 │   ├── graph_controller.py        graphique temps réel (analogique + logique, seuil, curseur)
 │   ├── fft_controller.py          spectre temps réel et réglages FFT
+│   ├── cursor_controller.py       curseurs de mesure (t1/t2, y1/y2) et mesures associées
 │   └── main_controller.py         câblage des contrôleurs et de la vue
 ├── view/main_window.py            fenêtre : barre d'outils, arbre, paramètres, graphique, barre d'état
 ├── ressources/pens.py             couleurs des voies (palette tab20 du GLviewer)
@@ -143,6 +145,31 @@ Graphique : un double-clic place le curseur vertical. La colonne *Valeur* de
 l'arborescence donne alors la valeur de chaque voie sous le curseur (sans curseur : le
 dernier point de la trame). Les cases à cocher masquent ou affichent les courbes.
 
+### Curseurs de mesure
+
+Groupe *Curseurs* de l'arbre des paramètres, sur le modèle des curseurs du GLviewer
+(*Cursors menu* : Waveform, barres horizontales, verticales, H&V). *Type* propose
+**Aucun**, **Verticaux**, **Horizontaux** ou **Verticaux + horizontaux**.
+
+* **Curseurs verticaux t1 / t2** : deux lignes à faire glisser, présentes sur le
+  panneau analogique comme sur le panneau logique (positions liées). Les champs *t1* et
+  *t2* sont liés aux lignes dans les deux sens, et *Δt* et *1/Δt* sont affichés. Dans
+  l'arborescence, la colonne *Valeur (t1)* donne la valeur de chaque voie en t1, et la
+  colonne *Δ t2−t1* son écart y(t2) − y(t1). Pour une voie logique, cet écart vaut
+  +1, 0 ou −1 : changement d'état entre les curseurs.
+* **Curseurs horizontaux y1 / y2** : deux niveaux sur le panneau analogique, avec leur
+  écart *Δy*.
+* **Mesures** sur la *voie de mesure*, entre t1 et t2 : y(t1), y(t2), Δy, pente
+  Δy/Δt, min, max, crête-crête, moyenne, valeur efficace, nombre d'échantillons. On
+  choisit la voie dans le groupe ou en cliquant sur la voie dans l'arborescence.
+
+Les valeurs sont celles de l'échantillon le plus proche de chaque curseur (curseur
+« magnétique »). Un résumé (Δt, Δy, mesures) s'affiche en haut à gauche du graphique.
+Les mesures suivent chaque nouvelle trame et restent figées avec *Figer*. Sans curseurs
+verticaux, le double-clic place toujours le curseur simple.
+
+![curseurs](docs/capture_cursors.png)
+
 ### FFT
 
 Le bouton **FFT** (F9) affiche le spectre des voies analogiques sous le graphique
@@ -194,7 +221,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-43 tests : protocole (octet par octet contre `logger.m`), FFT, acquisition complète contre le
+47 tests : protocole (octet par octet contre `logger.m`), FFT, curseurs, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes
@@ -203,7 +230,6 @@ simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors
   des temps ; le contenu des octets 2 à 5 des datagrammes de données (numéro de paquet ?)
   pour réordonner les paquets plutôt que de les prendre dans l'ordre d'arrivée.
 * Persistance : superposer les N dernières trames (mode oscilloscope).
-* Mesures au curseur (deux curseurs, Δt, Δy), comme dans le GLviewer.
 * Relire les enregistrements dans le GLviewer. Son import « .csv » attend le format de
   l'automate du chiller (colonnes X/Y alternées) : il faut un format d'export adapté ou un
   chargeur dédié, par exemple via l'assistant d'import texte.

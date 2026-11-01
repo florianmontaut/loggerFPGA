@@ -153,3 +153,60 @@ def _peak_freqs(fft, sig):
     return [p.frequency for p in spectrum.find_peaks(fft.freq, fft.amp[:, j], 3,
                                                      fft.p("Fenêtre").value(),
                                                      min_frequency=fft.freq[1])]
+
+
+def test_measure_cursors(setup):
+    """Trame connue injectée directement : rampe sur la voie 4, créneau logique."""
+    from model.config import FULL_SCALE
+    from model.protocol import encode_payload, make_frame
+    qapp, sim, window, ctrl = setup
+    cfg = ctrl.config_ctrl.to_config()                      # voies [1, 4, 6, 15], 1,25 MHz
+    n = cfg.samples_per_channel
+    raw = np.zeros((n, 4), dtype=np.int16)
+    raw[:, 1] = (np.arange(n) * 4).astype(np.int16)         # voie 4 : rampe
+    raw[n // 2:, 3] = 0b1                                   # K_HV passe à 1 à mi-trame
+    frame = make_frame(encode_payload(raw), cfg, 1)
+    ctrl.graph_ctrl.on_frame(frame)
+    wait(qapp, lambda: False, 0.1)
+
+    cur = ctrl.cursor_ctrl
+    cur.set_type("Verticaux")
+    assert cur.v_lines["analog"][0] in ctrl.graph_ctrl.analog_plot.items
+    assert cur.v_lines["logic"][0] in ctrl.graph_ctrl.logic_plot.items
+    assert not ctrl.tree_ctrl.view.isColumnHidden(ctrl.tree_ctrl.DELTA)
+
+    fs = cfg.sample_rate
+    i1, i2 = 1000, 3000
+    cur.set_vertical(i1 / fs, i2 / fs)
+    assert cur.v_lines["analog"][1].value() == pytest.approx(i2 / fs)
+    assert cur.v_lines["logic"][1].value() == pytest.approx(i2 / fs)
+    # Δ par voie dans l'arborescence : rampe 4 points/échantillon, gain 100 / 16384
+    step = 4 * cfg.gain(4) / FULL_SCALE
+    assert float(ctrl.tree_ctrl.items[("A", 4)][3].text()) == pytest.approx((i2 - i1) * step, rel=1e-4)
+    assert ctrl.tree_ctrl.items[("L", 0)][3].text() == "+1"
+    assert ctrl.tree_ctrl.items[("L", 0)][1].text() == "0"           # valeur en t1
+    assert cur.p("Verticaux", "Δt").value() == "1.6 ms"
+
+    # voie de mesure : clic sur la voie 4 dans l'arborescence
+    ctrl.tree_ctrl.view.setCurrentIndex(ctrl.tree_ctrl.items[("A", 4)][0].index())
+    assert cur.p("Voie de mesure").value() == 4
+    assert cur.p("Mesures", "Échantillons").value() == str(i2 - i1 + 1)
+    assert cur.p("Mesures", "Crête-crête").value().startswith(f"{(i2 - i1) * step:.4g}"[:4])
+
+    # déplacer la ligne du panneau logique déplace celle du panneau analogique et t1
+    cur.v_lines["logic"][0].setValue(2500 / fs)          # après le front (2048)
+    assert cur.v_lines["analog"][0].value() == pytest.approx(2500 / fs)
+    assert cur.p("Verticaux", "t1").value() == pytest.approx(2500 / fs)
+    assert ctrl.tree_ctrl.items[("L", 0)][3].text() == "+0"
+
+    # curseurs horizontaux en plus
+    cur.set_type("Verticaux + horizontaux")
+    cur.set_horizontal(-10.0, 15.0)
+    assert cur.h_lines[1].value() == 15.0
+    assert cur.p("Horizontaux", "Δy").value() == "25 V"
+    assert "Δt" in cur.readout.text and "Δy (curseurs)" in cur.readout.text
+    window.grab().save(str(SHOTS / "logger_cursors.png"))
+
+    cur.set_type("Aucun")
+    assert cur.v_lines["analog"][0] not in ctrl.graph_ctrl.analog_plot.items
+    assert ctrl.tree_ctrl.view.isColumnHidden(ctrl.tree_ctrl.DELTA)

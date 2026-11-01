@@ -28,7 +28,8 @@ class ChannelTreeController(QtCore.QObject):
     visibility_changed = QtCore.pyqtSignal(object, bool)   # clé, visible
     channel_selected = QtCore.pyqtSignal(object)            # clé
 
-    COLUMNS = ["Voie", "Valeur", "Unité"]
+    COLUMNS = ["Voie", "Valeur", "Unité", "Δ t2−t1"]
+    DELTA = 3
 
     def __init__(self, view: QtWidgets.QTreeView):
         super().__init__()
@@ -45,6 +46,8 @@ class ChannelTreeController(QtCore.QObject):
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.view.setColumnHidden(self.DELTA, True)   # visible avec les curseurs verticaux
 
     def build(self, cfg: LoggerConfig):
         self.model.blockSignals(True)
@@ -80,32 +83,46 @@ class ChannelTreeController(QtCore.QObject):
         return row
 
     def _channel(self, parent, key, name, unit, color):
-        row = self._row(name, "", unit)
+        row = self._row(name, "", unit, "")
         row[0].setCheckable(True)
         row[0].setCheckState(QtCore.Qt.CheckState.Unchecked if key in self.hidden
                              else QtCore.Qt.CheckState.Checked)
         row[0].setIcon(pens.swatch(color))
         row[0].setData(key, KEY_ROLE)
-        row[1].setTextAlignment(QtCore.Qt.AlignmentFlag.AlignRight
-                                | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        for item in (row[1], row[self.DELTA]):
+            item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignRight
+                                  | QtCore.Qt.AlignmentFlag.AlignVCenter)
         parent.appendRow(row)
         self.items[key] = row
 
     def is_visible(self, key) -> bool:
         return key not in self.hidden
 
-    def set_values(self, values: dict):
+    def set_values(self, values: dict, column: int = 1):
         """values : clé -> valeur (float) ; les autres voies sont vidées."""
         for key, row in self.items.items():
             value = values.get(key)
             if value is None:
                 text = ""
             elif key[0] == "L":
-                text = f"{int(value)}"
+                text = f"{int(value):+d}" if column == self.DELTA else f"{int(value)}"
             else:
-                text = f"{value:.5g}"
-            if row[1].text() != text:
-                row[1].setText(text)
+                text = f"{value:+.5g}" if column == self.DELTA else f"{value:.5g}"
+            if row[column].text() != text:
+                row[column].setText(text)
+
+    def set_cursor_values(self, values: dict | None, deltas: dict | None):
+        """
+        Curseurs verticaux : valeur de chaque voie en t1 et Δ = y(t2) - y(t1) ;
+        None : curseurs masqués, colonne Δ cachée.
+        """
+        active = values is not None
+        self.view.setColumnHidden(self.DELTA, not active)
+        self.model.setHeaderData(1, QtCore.Qt.Orientation.Horizontal,
+                                 "Valeur (t1)" if active else "Valeur")
+        if active:
+            self.set_values(values)
+            self.set_values(deltas or {}, self.DELTA)
 
     def _on_item_changed(self, item: QtGui.QStandardItem):
         key = item.data(KEY_ROLE)
