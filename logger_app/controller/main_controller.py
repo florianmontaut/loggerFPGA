@@ -6,6 +6,7 @@ Relie la vue et les contrôleurs (rôle du MainController du GLviewer) :
     actions Démarrer / Trame unique ──> AcquisitionController.start(config)
     AcquisitionController ──frame_ready──> LiveGraphController.on_frame
     LiveGraphController ──cursor_values──> ChannelTreeController.set_values
+    CursorController (t1, t2, y1, y2) ──channel_values──> ChannelTreeController (Valeur, Δ)
     ChannelTreeController ──visibility_changed──> LiveGraphController.set_visible
     AcquisitionController ──frame_ready──> FFTController.on_frame (spectre, si FFT activée)
 
@@ -21,6 +22,7 @@ from PyQt6 import QtCore, QtWidgets
 from controller.acquisition_controller import AcquisitionController
 from controller.channel_tree_controller import ChannelTreeController
 from controller.config_controller import ConfigController
+from controller.cursor_controller import CursorController
 from controller.fft_controller import FFTController
 from controller.graph_controller import LiveGraphController
 from model.config import ConfigError, LoggerConfig
@@ -49,6 +51,7 @@ class MainController(QtCore.QObject):
         self.config_ctrl = ConfigController(view.configtree, cfg)
         self.tree_ctrl = ChannelTreeController(view.treechannels)
         self.graph_ctrl = LiveGraphController(view.maingraph)
+        self.cursor_ctrl = CursorController(self.graph_ctrl, view.configtree)
         self.fft_ctrl = FFTController(view.fftgraph, view.configtree)
         self.acq_ctrl = AcquisitionController()
 
@@ -81,7 +84,10 @@ class MainController(QtCore.QObject):
         self.acq_ctrl.running_changed.connect(self._on_running)
         self.acq_ctrl.started_with.connect(lambda cfg: self._apply_preview(cfg, force=True))
 
-        self.graph_ctrl.cursor_values.connect(self.tree_ctrl.set_values)
+        self.graph_ctrl.cursor_values.connect(self._on_graph_values)
+        # curseurs de mesure : valeurs en t1 et Δy dans l'arborescence
+        self.cursor_ctrl.channel_values.connect(self.tree_ctrl.set_cursor_values)
+        self.tree_ctrl.channel_selected.connect(self.cursor_ctrl.select_channel)
         self.graph_ctrl.fps_changed.connect(lambda fps: v.fpsLabel.setText(f"{fps:.0f} img/s"))
         self.tree_ctrl.visibility_changed.connect(self.graph_ctrl.set_visible)
 
@@ -116,7 +122,13 @@ class MainController(QtCore.QObject):
             return
         self.tree_ctrl.build(cfg)
         self.graph_ctrl.configure(cfg)
+        self.cursor_ctrl.configure(cfg)
         self.fft_ctrl.configure(cfg)
+
+    def _on_graph_values(self, values: dict):
+        """Valeurs sous le curseur simple (double-clic), sauf si les curseurs t1/t2 sont actifs."""
+        if not self.cursor_ctrl.vertical:
+            self.tree_ctrl.set_values(values)
 
     def _on_stats(self, stats: dict):
         self.view.framesLabel.setText(f"Trames : {stats['frames']}")
