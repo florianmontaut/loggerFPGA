@@ -9,7 +9,8 @@ Fenêtre principale, sur le modèle du GLviewer :
     |  (Voie|Valeur|Unité) |       graphique temps réel                 |
     +----------------------+   (voies analogiques / voies logiques)     |
     | paramètres logger    |                                            |
-    |  (ParameterTree)     |                                            |
+    |  (ParameterTree)     +--------------------------------------------+
+    |  + réglages FFT      |       spectre (FFT), si activé             |
     +----------------------+--------------------------------------------+
     | barre d'état : état | trames | erreurs | images/s | messages       |
     +-------------------------------------------------------------------+
@@ -70,6 +71,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actionAutoRange = self._action("Échelle auto", "Adapter l'échelle à chaque trame",
                                             checkable=True, icon=sp.SP_BrowserReload)
         self.actionAutoRange.setChecked(True)
+        self.actionFFT = self._action("FFT", "Afficher le spectre des voies analogiques (F9)",
+                                      "F9", checkable=True, icon=sp.SP_FileDialogContentsView)
+        self.actionResetFFT = self._action("Remise à zéro FFT",
+                                           "Recommencer la moyenne / le maximum du spectre",
+                                           icon=sp.SP_DialogResetButton)
         self.actionLoadConfig = self._action("Ouvrir une configuration...",
                                              "Charger une configuration (.json)",
                                              QtGui.QKeySequence.StandardKey.Open,
@@ -90,6 +96,8 @@ class MainWindow(QtWidgets.QMainWindow):
         menu.addActions([self.actionRecord])
         menu = self.menuBar().addMenu("Affichage")
         menu.addActions([self.actionPause, self.actionAutoRange])
+        menu.addSeparator()
+        menu.addActions([self.actionFFT, self.actionResetFFT])
 
     def _init_toolbar(self):
         self.toolbar = QtWidgets.QToolBar("Barre d'outils", self)
@@ -102,6 +110,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.toolbar.addActions([self.actionStart, self.actionSingle, self.actionStop])
         self.toolbar.addSeparator()
         self.toolbar.addActions([self.actionPause, self.actionAutoRange])
+        self.toolbar.addSeparator()
+        self.toolbar.addActions([self.actionFFT, self.actionResetFFT])
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.actionRecord)
 
@@ -123,8 +133,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.left_splitter.setMinimumWidth(340)
 
         self.maingraph = pg.GraphicsLayoutWidget()
+        # spectre (FFT) sous le graphique temporel, masqué tant que l'action FFT est décochée
+        self.fftgraph = pg.GraphicsLayoutWidget()
+        self.fftgraph.hide()
+        self.graph_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.graph_splitter.addWidget(self.maingraph)
+        self.graph_splitter.addWidget(self.fftgraph)
+        self.graph_splitter.setStretchFactor(0, 3)
+        self.graph_splitter.setStretchFactor(1, 2)
+        self.actionFFT.toggled.connect(self._show_fft)
         self.splitter.addWidget(self.left_splitter)
-        self.splitter.addWidget(self.maingraph)
+        self.splitter.addWidget(self.graph_splitter)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 4)
         self.splitter.setCollapsible(0, False)
@@ -140,6 +159,13 @@ class MainWindow(QtWidgets.QMainWindow):
             label.setContentsMargins(8, 0, 8, 0)
             bar.addPermanentWidget(label)
         self.stateLabel.setMinimumWidth(110)
+
+    def _show_fft(self, show: bool):
+        """Spectre affiché sous le graphique temporel (40 % de la hauteur)."""
+        self.fftgraph.setVisible(show)
+        if show:
+            total = max(sum(self.graph_splitter.sizes()), 1)
+            self.graph_splitter.setSizes([int(total * 0.6), total - int(total * 0.6)])
 
     def show_message(self, text: str, timeout_ms: int = 5000):
         self.statusBar().showMessage(text, timeout_ms)
