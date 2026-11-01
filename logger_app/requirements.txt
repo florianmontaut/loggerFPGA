@@ -1,0 +1,6 @@
+# Versions alignées sur le GLviewer (Python 3.11)
+PyQt6>=6.4.2
+pyqtgraph>=0.13.3
+numpy>=1.26
+# optionnel : même thème que le GLviewer
+pyqtdarktheme==2.1.0
