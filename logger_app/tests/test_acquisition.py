@@ -91,14 +91,43 @@ def test_stop_request_while_waiting_trigger(app):
 
 
 def test_recording_csv(app, tmp_path):
+    """Un seul fichier pour l'enregistrement, colonne trame en tête, description .json."""
+    import json
     worker, sim, frames, errors, _ = run_acquisition(
-        app, dict(signals=[2, 15], max_frames=2, record=True, record_dir=str(tmp_path),
+        app, dict(signals=[2, 15], max_frames=3, record=True, record_dir=str(tmp_path),
                   record_prefix="essai"))
-    files = sorted(p.name for p in tmp_path.iterdir())
-    assert files == ["essai_V_PH1_INV1_Logic_div_20_1.csv", "essai_V_PH1_INV1_Logic_div_20_2.csv"]
-    table = np.loadtxt(tmp_path / files[0], delimiter=",", skiprows=1)
-    assert table.shape == (8192, 1 + 1 + 16)
-    np.testing.assert_allclose(table[:, 1], frames[0].analog[:, 0], rtol=1e-6)
+    csv = [p for p in tmp_path.iterdir() if p.suffix == ".csv"]
+    assert len(csv) == 1 and csv[0].name.startswith("essai_V_PH1_INV1_Logic_div_20_")
+    header = csv[0].read_text().splitlines()[0].split(",")
+    assert header[:3] == ["trame", "temps_s", "V_PH1_INV1"] and len(header) == 2 + 1 + 16
+    table = np.loadtxt(csv[0], delimiter=",", skiprows=1)
+    assert table.shape == (3 * 8192, 19)
+    assert list(np.unique(table[:, 0])) == [1, 2, 3]
+    second = table[table[:, 0] == 2]
+    np.testing.assert_allclose(second[:, 2], frames[1].analog[:, 0], rtol=1e-6)
+    assert all(f.meta["saved"] == str(csv[0]) for f in frames)    # marquées enregistrées
+    meta = json.loads(csv[0].with_suffix(".json").read_text())
+    assert [t["trame"] for t in meta["trames"]] == [1, 2, 3]
+    assert meta["configuration"]["signals"] == [2, 15]
+
+
+def test_frame_numbering_continues_between_acquisitions(app):
+    worker, sim, frames, errors, _ = run_acquisition(
+        app, dict(signals=[0], max_frames=2))
+    assert [f.index for f in frames] == [1, 2]
+    port = next(_ports)
+    sim = FpgaSimulator(ip="127.0.0.2", port=port, cmd_port=port + 1)
+    sim.start()
+    cfg = LoggerConfig(ip_fpga="127.0.0.2", port_fpga=port, port_cmd=port + 1,
+                       local_ip="127.0.0.1", local_port=port + 2, signals=[0], max_frames=2)
+    worker = AcquisitionWorker(cfg, first_index=3)
+    got = []
+    worker.frame_ready.connect(got.append)
+    worker.start()
+    worker.wait(5000)
+    app.processEvents()
+    sim.stop()
+    assert [f.index for f in got] == [3, 4]
 
 
 class ImmediateTripSimulator(FpgaSimulator):
@@ -120,3 +149,34 @@ def test_trigger_during_tempo_is_not_lost(app, monkeypatch):
         timeout=8)
     assert not errors
     assert len(frames) == 1
+
+
+def test_recorder_never_overwrites_and_npz(tmp_path):
+    from model.protocol import encode_payload, make_frame
+    from model.recorder import FrameRecorder, save_frames
+    cfg = LoggerConfig(signals=[2, 15], record_dir=str(tmp_path), record_prefix="essai")
+    raw = np.zeros((8192, 2), dtype=np.int16)
+    raw[:, 1] = 5
+    frames = [make_frame(encode_payload(raw), cfg, i) for i in (7, 8)]
+    first = FrameRecorder(cfg)
+    first.write(frames[0])
+    first.close()
+    second = FrameRecorder(cfg)                       # même seconde : nom déjà pris
+    second.close()
+    assert second.path != first.path and second.path.endswith("_2.csv")
+    path = save_frames(frames, cfg, str(tmp_path / "tampon.npz"))
+    data = np.load(path)
+    assert list(data["trame"]) == [7, 8]
+    assert data["analog"].shape == (2, 8192, 1) and data["logic"].shape == (2, 8192, 16)
+    assert data["logic"][1, 0, 0] == 1 and data["logic"][1, 0, 2] == 1
+    with pytest.raises(ValueError):                   # autre disposition de voies
+        save_frames([make_frame(encode_payload(np.zeros((16384, 1), dtype=np.int16)),
+                                LoggerConfig(signals=[0]), 1)], cfg, str(tmp_path / "x.csv"))
+
+
+def test_recorder_unwritable_dir(tmp_path):
+    from model.recorder import FrameRecorder
+    blocker = tmp_path / "fichier"
+    blocker.write_text("x")                      # un fichier à la place du dossier
+    with pytest.raises(OSError):
+        FrameRecorder(LoggerConfig(record_dir=str(blocker / "sous_dossier")))

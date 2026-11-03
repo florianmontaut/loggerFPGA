@@ -70,6 +70,22 @@ class MainWindow(QtWidgets.QMainWindow):
                                         icon=sp.SP_MediaPause)
         self.actionRecord = self._action("Enregistrer", "Enregistrer chaque trame sur disque",
                                          checkable=True, icon=sp.SP_DialogSaveButton)
+        self.actionOpenRecordDir = self._action("Ouvrir le dossier d'enregistrement",
+                                                "Afficher les fichiers enregistrés",
+                                                icon=sp.SP_DirOpenIcon)
+        # mémoire tampon : navigation dans les trames gardées en mémoire
+        self.actionPrevFrame = self._action("Trame précédente",
+                                            "Afficher la trame précédente de la mémoire tampon "
+                                            "(Alt+←)", "Alt+Left", icon=sp.SP_ArrowLeft)
+        self.actionNextFrame = self._action("Trame suivante",
+                                            "Afficher la trame suivante de la mémoire tampon "
+                                            "(Alt+→)", "Alt+Right", icon=sp.SP_ArrowRight)
+        self.actionLiveFrame = self._action("Direct", "Revenir à l'affichage en direct "
+                                            "(Alt+Fin)", "Alt+End", icon=sp.SP_MediaSkipForward)
+        self.actionSaveBuffer = self._action("Enregistrer la mémoire tampon...",
+                                             "Enregistrer les trames gardées en mémoire dans un "
+                                             "fichier (Ctrl+Maj+S)", "Ctrl+Shift+S",
+                                             icon=sp.SP_DialogSaveButton)
         self.actionAutoRange = self._action("Échelle auto", "Adapter l'échelle à chaque trame",
                                             checkable=True, icon=sp.SP_BrowserReload)
         self.actionAutoRange.setChecked(True)
@@ -91,15 +107,19 @@ class MainWindow(QtWidgets.QMainWindow):
         menu = self.menuBar().addMenu("Fichier")
         menu.addActions([self.actionLoadConfig, self.actionSaveConfig])
         menu.addSeparator()
+        menu.addAction(self.actionSaveBuffer)
+        menu.addSeparator()
         menu.addAction(self.actionQuit)
         menu = self.menuBar().addMenu("Acquisition")
         menu.addActions([self.actionStart, self.actionSingle, self.actionStop])
         menu.addSeparator()
-        menu.addActions([self.actionRecord])
+        menu.addActions([self.actionRecord, self.actionOpenRecordDir])
         menu = self.menuBar().addMenu("Affichage")
         menu.addActions([self.actionPause, self.actionAutoRange])
         menu.addSeparator()
         menu.addActions([self.actionFFT, self.actionResetFFT])
+        menu.addSeparator()
+        menu.addActions([self.actionPrevFrame, self.actionNextFrame, self.actionLiveFrame])
         # rempli par DetachController : un graphique déportable par entrée
         self.menuWindows = self.menuBar().addMenu("Fenêtres")
 
@@ -129,6 +149,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.treechannels.setAllColumnsShowFocus(True)
         self.treechannels.setUniformRowHeights(True)
         self.tree_tabs.addTab(self.treechannels, "Voies")
+        self.tree_tabs.addTab(self._init_frames_tab(), "Trames")
 
         self.configtree = ptree.ParameterTree(showHeader=False)
         self.left_splitter.addWidget(self.tree_tabs)
@@ -157,13 +178,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self.splitter.setCollapsible(0, False)
         self.setCentralWidget(self.splitter)
 
+    def _init_frames_tab(self) -> QtWidgets.QWidget:
+        """
+        Onglet « Trames » : trames de la mémoire tampon (vignette de la première voie,
+        numéro, heure), navigation et enregistrement.
+        """
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(2, 2, 2, 2)
+        bar = QtWidgets.QToolBar()
+        bar.setIconSize(QtCore.QSize(16, 16))
+        bar.addActions([self.actionPrevFrame, self.actionNextFrame, self.actionLiveFrame])
+        bar.addSeparator()
+        bar.addAction(self.actionSaveBuffer)
+        layout.addWidget(bar)
+        self.framesList = QtWidgets.QListWidget()
+        self.framesList.setIconSize(QtCore.QSize(120, 34))
+        self.framesList.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.framesList.setUniformItemSizes(True)
+        self.framesList.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.ActionsContextMenu)
+        layout.addWidget(self.framesList)
+        self.bufferLabel = QtWidgets.QLabel("")
+        self.bufferLabel.setWordWrap(True)
+        layout.addWidget(self.bufferLabel)
+        return tab
+
     def _init_status_bar(self):
         bar = self.statusBar()
         self.stateLabel = QtWidgets.QLabel("Arrêté")
         self.framesLabel = QtWidgets.QLabel("Trames : 0")
         self.errorsLabel = QtWidgets.QLabel("Erreurs : 0")
         self.fpsLabel = QtWidgets.QLabel("")
-        for label in (self.stateLabel, self.framesLabel, self.errorsLabel, self.fpsLabel):
+        # enregistrement en cours (vide sinon)
+        self.recordLabel = QtWidgets.QLabel("")
+        self.recordLabel.setStyleSheet("color: #d62728; font-weight: bold;")
+        for label in (self.recordLabel, self.stateLabel, self.framesLabel, self.errorsLabel, self.fpsLabel):
             label.setContentsMargins(8, 0, 8, 0)
             bar.addPermanentWidget(label)
         self.stateLabel.setMinimumWidth(110)
@@ -171,6 +221,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_message(self, text: str, timeout_ms: int = 5000):
         self.statusBar().showMessage(text, timeout_ms)
 
+    # fermeture : callable() -> bool, False pour l'annuler (trames non enregistrées)
+    close_guard = None
+
     def closeEvent(self, event):
+        if self.close_guard is not None and not self.close_guard():
+            event.ignore()
+            return
         self.closing.emit()
         super().closeEvent(event)

@@ -161,6 +161,14 @@ class FFTController(QtCore.QObject):
         self.frame = frame
         self._compute(frame)
 
+    def show_frame(self, frame: Frame):
+        """Spectre d'une trame donnée (mémoire tampon) : moyenne recommencée."""
+        self.frame = frame
+        if not self.enabled or not frame.analog_signals:
+            return
+        self._reset_average()
+        self._compute(frame)
+
     def _compute(self, frame: Frame):
         freq, amp = spectrum.amplitude_spectrum(frame.analog, frame.sample_rate,
                                                 self.p("Fenêtre").value(),

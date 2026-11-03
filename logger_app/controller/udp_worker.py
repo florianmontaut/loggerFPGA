@@ -33,6 +33,9 @@ class AcquisitionWorker(QtCore.QThread):
     state_changed = QtCore.pyqtSignal(str)         # IDLE, CONFIG, WAIT_TRIG, READING, ...
     error = QtCore.pyqtSignal(str)
     stats_changed = QtCore.pyqtSignal(dict)        # frames, errors, timeouts, recorded
+    # enregistrement démarré (True, dossier) ou arrêté (False, dossier)
+    recording_changed = QtCore.pyqtSignal(bool, str)
+    recording_failed = QtCore.pyqtSignal(str)      # enregistrement impossible : message
 
     POLL_S = 0.2              # réactivité à la demande d'arrêt
     TRIG_TIMEOUT_S = 2.0      # udp_read(udp_com, 6, 2000) dans logger.m
@@ -40,15 +43,56 @@ class AcquisitionWorker(QtCore.QThread):
     PACKET_TIMEOUT_S = 0.02   # udp_read(udp_com, 1030, 20) dans logger.m
     RCVBUF = 4 * 1024 * 1024
 
-    def __init__(self, cfg: LoggerConfig, parent=None):
+    def __init__(self, cfg: LoggerConfig, parent=None, first_index: int = 1):
         super().__init__(parent)
+        # numéro de la première trame : la numérotation continue d'une acquisition à
+        # l'autre (numéro unique dans la mémoire tampon et dans les fichiers)
+        self.first_index = first_index
         self.cfg = cfg.copy()
         self.cfg.validate()
         self._stop = threading.Event()
         self.sock: socket.socket | None = None
         self.stats = {"frames": 0, "errors": 0, "timeouts": 0, "recorded": 0}
+        # enregistrement demandé depuis l'interface, appliqué par le thread à la trame
+        # suivante : (actif, dossier, préfixe, format) ; affectation atomique en Python
+        self._record_request = (cfg.record, cfg.record_dir, cfg.record_prefix,
+                                cfg.record_format)
+        self._recorder: FrameRecorder | None = None
+        self._record_state = None
 
     # ------------------------------------------------------------------ commande
+    def set_recording(self, enabled: bool, record_dir: str, prefix: str, fmt: str):
+        """Démarre / arrête l'enregistrement en cours d'acquisition (appel depuis l'interface)."""
+        self._record_request = (enabled, record_dir, prefix, fmt)
+
+    def _apply_record_request(self):
+        """Dans le thread d'acquisition : (re)crée ou ferme l'enregistreur si demandé."""
+        request = self._record_request
+        if request == self._record_state:
+            return
+        self._record_state = request
+        enabled, record_dir, prefix, fmt = request
+        directory = self._recorder.directory if self._recorder else record_dir
+        self._close_recorder()
+        if enabled:
+            cfg = self.cfg.copy()
+            cfg.record_dir, cfg.record_prefix, cfg.record_format = record_dir, prefix, fmt
+            try:
+                self._recorder = FrameRecorder(cfg, fmt)
+                directory = self._recorder.path
+            except (OSError, ValueError) as exc:
+                self.recording_failed.emit(f"Enregistrement impossible : {exc}")
+                return
+        self.recording_changed.emit(enabled, directory)
+
+    def _close_recorder(self):
+        recorder, self._recorder = self._recorder, None
+        if recorder is not None:
+            try:
+                recorder.close()
+            except OSError as exc:
+                self.error.emit(f"Fermeture de l'enregistrement impossible : {exc}")
+
     def request_stop(self):
         self._stop.set()
 
@@ -59,7 +103,6 @@ class AcquisitionWorker(QtCore.QThread):
     # ------------------------------------------------------------------ thread
     def run(self):
         cfg = self.cfg
-        recorder = FrameRecorder(cfg, cfg.record_format) if cfg.record else None
         try:
             self._open()
             # datagrammes restés d'une session précédente : vidés AVANT la configuration.
@@ -89,18 +132,21 @@ class AcquisitionWorker(QtCore.QThread):
                 self.stats["frames"] += 1
                 if missing:
                     self.stats["errors"] += 1
-                    self.error.emit(f"Trame {self.stats['frames']} incomplète : "
+                    self.error.emit(f"Trame {self.first_index + self.stats['frames'] - 1} incomplète : "
                                     f"{missing} paquet(s) manquant(s)")
                 else:
-                    frame = protocol.make_frame(payload, cfg, self.stats["frames"], time.time())
-                    self.frame_ready.emit(frame)
-                    if recorder is not None:
+                    index = self.first_index + self.stats["frames"] - 1
+                    frame = protocol.make_frame(payload, cfg, index, time.time())
+                    # écrite avant d'être transmise : la mémoire tampon la sait enregistrée
+                    self._apply_record_request()
+                    if self._recorder is not None:
                         try:
-                            recorder.write(frame)
+                            frame.meta["saved"] = self._recorder.write(frame)
                             self.stats["recorded"] += 1
                         except OSError as exc:
-                            self.error.emit(f"Enregistrement impossible : {exc}")
-                            recorder = None
+                            self._close_recorder()
+                            self.recording_failed.emit(f"Enregistrement impossible : {exc}")
+                    self.frame_ready.emit(frame)
                 self.stats_changed.emit(dict(self.stats))
                 if self._sleep(cfg.tempo):
                     break
@@ -109,6 +155,10 @@ class AcquisitionWorker(QtCore.QThread):
         except Exception as exc:              # remonté à l'interface plutôt que perdu
             self.error.emit(f"Erreur d'acquisition : {exc!r}")
         finally:
+            if self._recorder is not None:
+                path = self._recorder.path
+                self._close_recorder()
+                self.recording_changed.emit(False, path)
             self._close()
             self.stats_changed.emit(dict(self.stats))
             self.state_changed.emit("IDLE")
