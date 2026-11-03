@@ -88,8 +88,10 @@ logger_app/
 │   ├── graph_controller.py        graphique temps réel (analogique + logique, seuil, curseur)
 │   ├── fft_controller.py          spectre temps réel et réglages FFT
 │   ├── cursor_controller.py       curseurs de mesure (t1/t2, y1/y2) et mesures associées
+│   ├── detach_controller.py       graphiques déportables dans leur propre fenêtre (écran déporté)
 │   └── main_controller.py         câblage des contrôleurs et de la vue
-├── view/main_window.py            fenêtre : barre d'outils, arbre, paramètres, graphique, barre d'état
+├── view/main_window.py            fenêtre : barre d'outils, arbre, paramètres, graphiques, barre d'état
+├── view/detached_window.py        fenêtre d'un graphique déporté
 ├── ressources/pens.py             couleurs des voies (palette tab20 du GLviewer)
 ├── tools/fpga_simulator.py        simulateur du FPGA (UDP local)
 └── tests/                         protocole, acquisition contre le simulateur, interface hors écran
@@ -170,6 +172,38 @@ verticaux, le double-clic place toujours le curseur simple.
 
 ![curseurs](docs/capture_cursors.png)
 
+### Écran déporté
+
+Chaque graphique peut être placé dans sa propre fenêtre, par exemple sur un deuxième
+écran : **voies analogiques**, **voies logiques** et **spectre (FFT)**. Le graphique
+temporel est découpé en deux widgets, avec les axes de gauche à largeur fixe pour garder
+les échelles des temps alignées.
+
+* Pour déporter : clic droit sur le graphique, puis *Déporter dans une fenêtre*. On peut
+  aussi passer par le menu **Fenêtres** (une case par graphique, et *Tout réintégrer*).
+* Pour réintégrer : fermer la fenêtre, ou clic droit puis *Réintégrer dans la fenêtre
+  principale*. Le graphique revient à sa place d'origine.
+* Les raccourcis F5 à F9 (Démarrer, Trame unique, Arrêter, Figer, FFT) restent actifs
+  dans les fenêtres déportées.
+* La fenêtre suit l'état du graphique. Si on décoche *FFT*, la fenêtre du spectre est
+  masquée, puis réaffichée quand on la recoche. Une configuration sans voie logique (ou
+  sans voie analogique) masque de même le panneau correspondant.
+* Position et taille des fenêtres, ainsi que l'état déporté, sont conservés d'une session
+  à l'autre (QSettings).
+* Quand tous les graphiques sont déportés, la fenêtre principale affiche un message à
+  leur place.
+
+Repris du GLviewer (`view/detached_graph_window.py`, `GraphController.detach_panel`) : la
+fenêtre dédiée, la réintégration à la fermeture, l'entrée du menu contextuel, le retour à
+la place d'origine. Différence : le GLviewer déplace le `PlotItem` d'une scène pyqtgraph
+à une autre, ce qui l'oblige à corriger les textes restés liés à l'ancienne scène
+(`_release_scene`). Ici c'est le widget graphique entier qui change de fenêtre. Sa scène,
+les connexions souris, les curseurs et les étiquettes le suivent donc sans traitement
+particulier. Pour rendre un nouveau graphique déportable, il suffit d'un appel à
+`DetachController.register(clé, titre, widget, [tracés])`.
+
+![FFT déportée : fenêtre principale](docs/capture_main_fft_deportee.png)
+
 ### FFT
 
 Le bouton **FFT** (F9) affiche le spectre des voies analogiques sous le graphique
@@ -221,7 +255,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-47 tests : protocole (octet par octet contre `logger.m`), FFT, curseurs, acquisition complète contre le
+50 tests : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes

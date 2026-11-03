@@ -7,6 +7,7 @@ Relie la vue et les contrôleurs (rôle du MainController du GLviewer) :
     AcquisitionController ──frame_ready──> LiveGraphController.on_frame
     LiveGraphController ──cursor_values──> ChannelTreeController.set_values
     CursorController (t1, t2, y1, y2) ──channel_values──> ChannelTreeController (Valeur, Δ)
+    DetachController : graphiques analogique / logique / FFT déportables dans une fenêtre
     ChannelTreeController ──visibility_changed──> LiveGraphController.set_visible
     AcquisitionController ──frame_ready──> FFTController.on_frame (spectre, si FFT activée)
 
@@ -23,6 +24,7 @@ from controller.acquisition_controller import AcquisitionController
 from controller.channel_tree_controller import ChannelTreeController
 from controller.config_controller import ConfigController
 from controller.cursor_controller import CursorController
+from controller.detach_controller import DetachController
 from controller.fft_controller import FFTController
 from controller.graph_controller import LiveGraphController
 from model.config import ConfigError, LoggerConfig
@@ -50,13 +52,27 @@ class MainController(QtCore.QObject):
 
         self.config_ctrl = ConfigController(view.configtree, cfg)
         self.tree_ctrl = ChannelTreeController(view.treechannels)
-        self.graph_ctrl = LiveGraphController(view.maingraph)
+        self.graph_ctrl = LiveGraphController(view.analoggraph, view.logicgraph)
         self.cursor_ctrl = CursorController(self.graph_ctrl, view.configtree)
         self.fft_ctrl = FFTController(view.fftgraph, view.configtree)
+        # graphiques déportables (écran déporté) ; position des fenêtres mémorisée
+        self.detach_ctrl = DetachController(
+            view, view.graph_splitter, view.graph_placeholder, view.menuWindows,
+            QtCore.QSettings("LoggerFPGA", "logger_app") if remember else None)
+        self.detach_ctrl.register("analog", "Voies analogiques", view.analoggraph,
+                                  [self.graph_ctrl.analog_plot], weight=3)
+        self.detach_ctrl.register("logic", "Voies logiques", view.logicgraph,
+                                  [self.graph_ctrl.logic_plot], weight=2)
+        self.detach_ctrl.register("fft", "Spectre (FFT)", view.fftgraph,
+                                  [self.fft_ctrl.plot], weight=2)
+        self.detach_ctrl.set_available("fft", False)
+        self.graph_ctrl.availability_changed.connect(self.detach_ctrl.set_available)
         self.acq_ctrl = AcquisitionController()
 
         self._connect()
         self._apply_preview(self.config_ctrl.cfg)
+        # fenêtres déportées de la session précédente, une fois la fenêtre principale ouverte
+        QtCore.QTimer.singleShot(0, self.detach_ctrl.restore)
         self._on_running(False)
 
     # ------------------------------------------------------------------ connexions
@@ -93,6 +109,7 @@ class MainController(QtCore.QObject):
 
         # FFT : mêmes trames, même pause, mêmes voies visibles que le graphique temporel
         v.actionFFT.toggled.connect(self.fft_ctrl.set_enabled)
+        v.actionFFT.toggled.connect(lambda on: self.detach_ctrl.set_available("fft", on))
         v.actionResetFFT.triggered.connect(self.fft_ctrl.reset)
         v.actionPause.toggled.connect(self.fft_ctrl.set_paused)
         self.acq_ctrl.frame_ready.connect(self.fft_ctrl.on_frame)
@@ -186,6 +203,7 @@ class MainController(QtCore.QObject):
 
     def quit(self):
         self.acq_ctrl.shutdown()
+        self.detach_ctrl.shutdown()
         if self.remember:
             try:
                 path = last_config_path()
