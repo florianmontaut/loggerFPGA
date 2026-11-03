@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph as pg
 import pyqtgraph.parametertree as ptree
-from PyQt6 import QtCore
+from PyQt6 import QtCore, QtGui
 
 from model import spectrum
 from model.config import LoggerConfig
@@ -26,15 +26,55 @@ from model.protocol import Frame
 from ressources import pens
 
 NONE = "(aucune)"
+LINEAR, LOG = "Linéaire", "Logarithmique"
+AXIS_SCALES = [LINEAR, LOG]
+SETTINGS_KEY = "fft/axe_frequences"
+
+
+class FrequencyAxis(pg.AxisItem):
+    """
+    Axe des fréquences. En échelle log, graduations aux décades (étiquetées) et à 2 et 5
+    fois chaque décade, écrites avec leur unité : 10 Hz, 20 Hz, 50 Hz, 100 Hz, 1 kHz...
+    (pyqtgraph mélangerait sinon préfixe SI et puissances de 10).
+    """
+
+    def updateAutoSIPrefix(self):
+        # bascule en log : la plage est encore en Hz linéaires (10**25000 -> inf, sans
+        # effet sur le préfixe calculé) ; avertissement de dépassement inutile
+        with np.errstate(over="ignore"):
+            super().updateAutoSIPrefix()
+
+    def tickValues(self, minVal, maxVal, size):
+        if not self.logMode:
+            return super().tickValues(minVal, maxVal, size)
+        lo, hi = int(np.floor(minVal)), int(np.ceil(maxVal))
+        decades = [float(d) for d in range(lo, hi + 1) if minVal <= d <= maxVal]
+        minor = [d + np.log10(m) for d in range(lo, hi + 1) for m in (2, 5)
+                 if minVal <= d + np.log10(m) <= maxVal]
+        # peu de décades visibles (zoom) : 2 et 5 étiquetés aussi
+        if len(decades) <= 2:
+            return [(1.0, sorted(decades + minor)),
+                    (0.1, [d + np.log10(m) for d in range(lo, hi + 1) for m in range(2, 10)
+                           if m not in (2, 5) and minVal <= d + np.log10(m) <= maxVal])]
+        return [(1.0, decades), (0.5, minor)]
+
+    def tickStrings(self, values, scale, spacing):
+        if not self.logMode:
+            return super().tickStrings(values, scale, spacing)
+        if spacing < 1.0:                 # graduations secondaires : sans étiquette
+            return ["" for _ in values]
+        return [_si(10 ** v, "Hz", digits=3) for v in values]
 
 
 class FFTController(QtCore.QObject):
 
     REFRESH_HZ = 30
 
-    def __init__(self, widget: pg.GraphicsLayoutWidget, tree: ptree.ParameterTree):
+    def __init__(self, widget: pg.GraphicsLayoutWidget, tree: ptree.ParameterTree,
+                 settings: QtCore.QSettings | None = None):
         super().__init__()
         self.widget = widget
+        self.settings = settings          # choix de l'axe des fréquences mémorisé
         self.cfg: LoggerConfig | None = None
         self.enabled = False
         self.paused = False
@@ -60,7 +100,8 @@ class FFTController(QtCore.QObject):
              "visible": False},
             {"name": "Fréquence max (Hz)", "type": "float", "limits": (0, None), "value": 0.0,
              "siPrefix": True, "tip": "0 : jusqu'à la moitié de la fréquence d'échantillonnage"},
-            {"name": "Fréquences en log", "type": "bool", "value": False},
+            {"name": "Axe des fréquences", "type": "list", "limits": AXIS_SCALES,
+             "value": LINEAR, "tip": "Aussi par clic droit sur le spectre"},
             {"name": "Voie analysée", "type": "list", "limits": [NONE], "value": NONE},
             {"name": "Pics repérés", "type": "int", "limits": (0, 20), "value": 5},
             {"name": "Harmoniques (THD)", "type": "int", "limits": (1, 50), "value": 10},
@@ -76,12 +117,21 @@ class FFTController(QtCore.QObject):
         self.params.sigTreeStateChanged.connect(self._on_params_changed)
 
         self.readout = pg.LabelItem(justify="right")
-        self.plot = pg.PlotItem()
+        self.plot = pg.PlotItem(axisItems={"bottom": FrequencyAxis("bottom")})
         self.plot.showGrid(x=True, y=True, alpha=0.3)
         self.plot.setDownsampling(auto=True, mode="peak")
         self.plot.setClipToView(True)
-        self.plot.setLabel("bottom", "Fréquence", units="Hz")
         self.plot.setTitle("Spectre")
+        # échelle des fréquences : un seul réglage, suivi par l'arbre des paramètres, le
+        # menu contextuel et l'option Log X de pyqtgraph (Plot Options > Transforms)
+        self.log_action = QtGui.QAction("Fréquences en échelle log", self.plot.vb.menu)
+        self.log_action.setCheckable(True)
+        self.log_action.toggled.connect(self.set_log_x)
+        self.plot.vb.menu.insertAction(self.plot.vb.menu.actions()[0], self.log_action)
+        self.plot.ctrl.logXCheck.toggled.connect(self.set_log_x)
+        # Log Y de pyqtgraph : non géré (marqueurs, mesures) ; l'échelle dB le remplace
+        self.plot.ctrl.logYCheck.setEnabled(False)
+        self.plot.ctrl.logYCheck.setToolTip("Utiliser l'échelle dB du groupe FFT")
         self.widget.addItem(self.readout, row=0, col=0)
         self.widget.addItem(self.plot, row=1, col=0)
         self.peak_markers = pg.ScatterPlotItem(symbol="t", size=9, brush=pg.mkBrush("#d62728"),
@@ -93,6 +143,44 @@ class FFTController(QtCore.QObject):
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._redraw)
         self.timer.start(int(1000 / self.REFRESH_HZ))
+
+        saved = self.settings.value(SETTINGS_KEY, LINEAR) if self.settings else LINEAR
+        self.set_log_x(saved == LOG)
+        self._apply_axis_label()
+
+    # ------------------------------------------------------------------ axe des fréquences
+    @property
+    def log_x(self) -> bool:
+        return self.p("Axe des fréquences").value() == LOG
+
+    def set_log_x(self, log: bool):
+        """Échelle des fréquences logarithmique ou linéaire (toutes les commandes)."""
+        log = bool(log)
+        self.p("Axe des fréquences").setValue(LOG if log else LINEAR)   # -> _on_params_changed
+
+    def _sync_log_x(self):
+        """Applique l'échelle choisie au tracé et aux commandes qui la reflètent."""
+        log = self.log_x
+        self.log_action.blockSignals(True)
+        self.log_action.setChecked(log)
+        self.log_action.blockSignals(False)
+        # coche la case Log X de pyqtgraph : c'est son signal qui convertit courbes et axes
+        # (PlotItem.updateLogMode) ; set_log_x, rappelé avec la même valeur, est sans effet
+        self.plot.setLogMode(x=log, y=False)
+        self._apply_axis_label()
+        self._apply_x_range()           # après updateLogMode, qui réactive l'échelle auto
+        if self.settings is not None:
+            self.settings.setValue(SETTINGS_KEY, LOG if log else LINEAR)
+
+    def _apply_axis_label(self):
+        axis = self.plot.getAxis("bottom")
+        if self.log_x:
+            # graduations déjà écrites avec leur unité (FrequencyAxis)
+            axis.enableAutoSIPrefix(False)
+            self.plot.setLabel("bottom", "Fréquence (échelle log)", units=None)
+        else:
+            axis.enableAutoSIPrefix(True)
+            self.plot.setLabel("bottom", "Fréquence", units="Hz")
 
     def p(self, *path):
         return self.params.child(*path)
@@ -122,7 +210,7 @@ class FFTController(QtCore.QObject):
         current = selector.value()
         selector.setLimits(choices)
         selector.setValue(current if current in choices.values() else next(iter(choices.values())))
-        self.plot.setXRange(0, cfg.sample_rate / 2, padding=0)
+        self._apply_x_range()            # en log comme en linéaire
         self._reset_average()
         self._update_labels()
 
@@ -187,9 +275,9 @@ class FFTController(QtCore.QObject):
         self.p("Nombre de trames").setOpts(visible=self.p("Moyennage").value() == "moyenne")
         if names & {"Fenêtre", "Retirer le continu", "Moyennage", "Nombre de trames"}:
             self.reset()
-        if "Fréquences en log" in names:
-            self.plot.setLogMode(x=self.p("Fréquences en log").value(), y=False)
-        if "Fréquence max (Hz)" in names or "Fréquences en log" in names:
+        if "Axe des fréquences" in names:
+            self._sync_log_x()
+        elif "Fréquence max (Hz)" in names:
             self._apply_x_range()
         self._update_labels()
         self._dirty = self.amp is not None
@@ -200,13 +288,13 @@ class FFTController(QtCore.QObject):
 
     def _x(self, freq: np.ndarray) -> slice:
         """Raies dessinées : sans la raie 0 en échelle log."""
-        return slice(1 if self.p("Fréquences en log").value() else 0, None)
+        return slice(1 if self.log_x else 0, None)
 
     def _apply_x_range(self):
         if self.cfg is None:
             return
         f_max = self.p("Fréquence max (Hz)").value() or self.cfg.sample_rate / 2
-        if self.p("Fréquences en log").value():
+        if self.log_x:
             df = self.cfg.sample_rate / self.cfg.samples_per_channel
             self.plot.setXRange(np.log10(df), np.log10(f_max), padding=0)
         else:
@@ -274,13 +362,13 @@ class FFTController(QtCore.QObject):
             f"{_si(pk.frequency, 'Hz'):>12}  {pk.amplitude:.5g} {unit}" for pk in peaks))
         if not peaks or not self.curves[sig].isVisible():
             return
-        log_x = self.p("Fréquences en log").value()
+        log_x = self.log_x
         xs = np.array([pk.frequency for pk in peaks])
         xs = np.log10(xs) if log_x else xs
         ys = self._scaled(amp)[[pk.index for pk in peaks]]
         self.peak_markers.setData(xs, ys)
         for x, y, pk in zip(xs, ys, peaks):
-            label = pg.TextItem(_si(pk.frequency, "Hz"), anchor=(-0.05, 1.0), color="#d62728")
+            label = pg.TextItem(_si(pk.frequency, "Hz"), anchor=(-0.1, 0.5), color="#d62728")
             label.setPos(x, y)
             self.plot.addItem(label, ignoreBounds=True)
             self.peak_labels.append(label)
@@ -289,7 +377,7 @@ class FFTController(QtCore.QObject):
         if self.amp is None or not self.plot.sceneBoundingRect().contains(pos):
             return
         x = self.plot.vb.mapSceneToView(pos).x()
-        f = 10 ** x if self.p("Fréquences en log").value() else x
+        f = 10 ** x if self.log_x else x
         i = int(np.clip(round(f / (self.freq[1] - self.freq[0])), 0, self.freq.size - 1))
         sig = self._signal()
         if sig not in self.signals:
@@ -300,8 +388,8 @@ class FFTController(QtCore.QObject):
                              f"{value:.5g} {unit}")
 
 
-def _si(value: float, unit: str) -> str:
+def _si(value: float, unit: str, digits: int = 6) -> str:
     for factor, prefix in ((1e6, "M"), (1e3, "k"), (1, ""), (1e-3, "m")):
         if abs(value) >= factor:
-            return f"{value / factor:.6g} {prefix}{unit}"
-    return f"{value:.6g} {unit}"
+            return f"{value / factor:.{digits}g} {prefix}{unit}"
+    return f"{value:.{digits}g} {unit}"

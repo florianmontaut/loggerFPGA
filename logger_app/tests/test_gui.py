@@ -297,7 +297,9 @@ def test_record_button_during_acquisition(setup, tmp_path, monkeypatch):
     qapp, sim, window, ctrl = setup
     ctrl.config_ctrl.p("Enregistrement", "Dossier").setValue(str(tmp_path))
     csvs = lambda: sorted(p for p in tmp_path.iterdir() if p.suffix == ".csv")
-    trames = lambda path: set(np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)[:, 0])
+    def trames(path):
+        lines = path.read_text().splitlines()[1:]       # en-tête seul : pas encore de trame
+        return {int(line.split(",", 1)[0]) for line in lines if line}
     assert window.actionRecord.isEnabled()
     window.actionStart.trigger()
     assert wait(qapp, lambda: ctrl.graph_ctrl.frame is not None)
@@ -473,3 +475,65 @@ def test_new_channel_layout_asks_before_clearing_buffer(setup, monkeypatch):
     assert wait(qapp, lambda: len(buf.buffer) >= 1 and buf.buffer.cfg.signals == [1, 7, 6, 15])
     window.actionStop.trigger()
     assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+
+
+def test_fft_frequency_axis_log_or_linear(setup, tmp_path):
+    """Axe des fréquences : arbre, menu contextuel et Log X de pyqtgraph synchronisés."""
+    from controller.fft_controller import FFTController, SETTINGS_KEY
+    from model.protocol import encode_payload, make_frame
+    qapp, sim, window, ctrl = setup
+    fft = ctrl.fft_ctrl
+    ctrl.config_ctrl.p("Échantillonnage", "Diviseur").setValue(500)          # 50 kHz
+    cfg = ctrl.config_ctrl.to_config()
+    window.actionFFT.setChecked(True)
+    n = cfg.samples_per_channel
+    t = np.arange(n) / cfg.sample_rate
+    raw = np.zeros((n, 4), dtype=np.int16)
+    raw[:, 0] = 8000 * np.sin(2 * np.pi * 100 * t) + 2000 * np.sin(2 * np.pi * 3000 * t)
+    ctrl.fft_ctrl.show_frame(make_frame(encode_payload(raw), cfg, 1))
+    wait(qapp, lambda: False, 0.1)
+    peaks_lin = fft.peak_markers.getData()[0].copy()
+    assert abs(peaks_lin[0] - 100) < 1
+
+    # arbre des paramètres
+    fft.p("Axe des fréquences").setValue("Logarithmique")
+    wait(qapp, lambda: False, 0.1)
+    assert fft.log_x and fft.log_action.isChecked() and fft.plot.ctrl.logXCheck.isChecked()
+    assert fft.curves[1].opts["logMode"][0]
+    lo, hi = fft.plot.vb.viewRange()[0]
+    df = cfg.sample_rate / n
+    assert lo == pytest.approx(np.log10(df), abs=0.01)
+    assert hi == pytest.approx(np.log10(cfg.sample_rate / 2), abs=0.01)
+    np.testing.assert_allclose(fft.peak_markers.getData()[0], np.log10(peaks_lin), rtol=1e-6)
+    axis = fft.plot.getAxis("bottom")
+    assert axis.tickStrings([2.0, 3.0], 1, 1.0) == ["100 Hz", "1 kHz"]
+    assert "log" in axis.labelText
+    window.fftgraph.grab().save(str(SHOTS / "logger_fft_log.png"))
+
+    # menu contextuel du spectre
+    fft.log_action.trigger()
+    assert not fft.log_x and fft.p("Axe des fréquences").value() == "Linéaire"
+    assert not fft.curves[1].opts["logMode"][0]
+    assert fft.plot.vb.viewRange()[0][1] == pytest.approx(cfg.sample_rate / 2)
+    # case Log X de pyqtgraph (Plot Options > Transforms)
+    fft.plot.ctrl.logXCheck.setChecked(True)
+    assert fft.log_x and fft.log_action.isChecked()
+    assert fft.plot.vb.viewRange()[0][1] == pytest.approx(np.log10(cfg.sample_rate / 2), abs=0.01)
+    assert not fft.plot.ctrl.logYCheck.isEnabled()
+
+    # nouvelle acquisition (reconfiguration) : la plage reste en échelle log
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: fft.amp is not None and ctrl.acq_ctrl.running)
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+    assert fft.plot.vb.viewRange()[0][1] < 10                       # log10(Hz), pas des Hz
+
+    # choix mémorisé d'une session à l'autre
+    settings = QtCore.QSettings(str(tmp_path / "s.ini"), QtCore.QSettings.Format.IniFormat)
+    settings.setValue(SETTINGS_KEY, "Logarithmique")
+    from pyqtgraph.parametertree import ParameterTree
+    import pyqtgraph as pg
+    other = FFTController(pg.GraphicsLayoutWidget(), ParameterTree(), settings)
+    assert other.log_x and other.plot.ctrl.logXCheck.isChecked()
+    other.set_log_x(False)
+    assert settings.value(SETTINGS_KEY) == "Linéaire"

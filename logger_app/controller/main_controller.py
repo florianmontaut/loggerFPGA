@@ -73,11 +73,14 @@ class MainController(QtCore.QObject):
         self.tree_ctrl = ChannelTreeController(view.treechannels)
         self.graph_ctrl = LiveGraphController(view.analoggraph, view.logicgraph)
         self.cursor_ctrl = CursorController(self.graph_ctrl, view.configtree)
-        self.fft_ctrl = FFTController(view.fftgraph, view.configtree)
+        # réglages de l'interface conservés d'une session à l'autre (fenêtres déportées,
+        # axe des fréquences de la FFT)
+        self.settings = QtCore.QSettings("LoggerFPGA", "logger_app") if remember else None
+        self.fft_ctrl = FFTController(view.fftgraph, view.configtree, self.settings)
         # graphiques déportables (écran déporté) ; position des fenêtres mémorisée
         self.detach_ctrl = DetachController(
             view, view.graph_splitter, view.graph_placeholder, view.menuWindows,
-            QtCore.QSettings("LoggerFPGA", "logger_app") if remember else None)
+            self.settings)
         self.detach_ctrl.register("analog", "Voies analogiques", view.analoggraph,
                                   [self.graph_ctrl.analog_plot], weight=3)
         self.detach_ctrl.register("logic", "Voies logiques", view.logicgraph,

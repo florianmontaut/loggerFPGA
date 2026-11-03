@@ -291,9 +291,24 @@ l'arbre des paramètres :
 | Retirer le continu | soustrait la moyenne de la trame avant la FFT |
 | Échelle | amplitude crête, efficace, ou dB (réf. 1 unité crête) |
 | Moyennage | aucun, moyenne des puissances des N dernières trames, maximum ; *Remise à zéro FFT* recommence |
-| Fréquence max, fréquences en log | zone affichée |
+| Fréquence max | limite haute de la zone affichée (0 : moitié de la fréquence d'échantillonnage) |
+| Axe des fréquences | **Linéaire** ou **Logarithmique** (voir ci-dessous) |
 | Voie analysée | voie des mesures ; un clic sur une voie de l'arborescence la sélectionne aussi |
 | Pics repérés, harmoniques | nombre de pics marqués (20 dB au moins au-dessus du bruit), harmoniques prises dans le THD |
+
+**Axe des fréquences linéaire ou logarithmique** : un seul réglage, accessible de trois
+façons qui restent synchronisées :
+- *Axe des fréquences* dans le groupe FFT ;
+- clic droit sur le spectre, *Fréquences en échelle log* ;
+- l'option *Log X* de pyqtgraph (clic droit, *Plot Options › Transforms*).
+
+En échelle log, l'axe va de la résolution (première raie après le continu) jusqu'à la
+fréquence max, avec des graduations aux décades écrites avec leur unité (10 Hz, 100 Hz,
+1 kHz…) et des repères à 2 et 5. Le choix est conservé d'une session à l'autre. *Log Y*
+de pyqtgraph est désactivé : marqueurs et mesures ne le suivraient pas, et l'échelle dB
+joue ce rôle.
+
+![FFT en échelle log](docs/capture_fft_log.png)
 
 *Mesures* (lecture seule) : résolution et bande équivalente de bruit, nombre de trames
 moyennées, fondamental (fréquence affinée par interpolation, amplitude), THD et liste des
@@ -329,7 +344,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-63 tests : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, acquisition complète contre le
+64 tests : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes
