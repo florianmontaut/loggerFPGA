@@ -128,7 +128,6 @@ class FFTController(QtCore.QObject):
 
     def set_enabled(self, enabled: bool):
         self.enabled = enabled
-        self.widget.setVisible(enabled)
         if enabled and self.frame is None and self.cfg is not None:
             self._reset_average()
 

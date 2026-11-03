@@ -11,6 +11,8 @@ Fenêtre principale, sur le modèle du GLviewer :
     | paramètres logger    |                                            |
     |  (ParameterTree)     +--------------------------------------------+
     |  + réglages FFT      |       spectre (FFT), si activé             |
+    |                      |  (chaque graphique peut être déporté dans  |
+    |                      |   sa propre fenêtre : menu Fenêtres)       |
     +----------------------+--------------------------------------------+
     | barre d'état : état | trames | erreurs | images/s | messages       |
     +-------------------------------------------------------------------+
@@ -98,6 +100,8 @@ class MainWindow(QtWidgets.QMainWindow):
         menu.addActions([self.actionPause, self.actionAutoRange])
         menu.addSeparator()
         menu.addActions([self.actionFFT, self.actionResetFFT])
+        # rempli par DetachController : un graphique déportable par entrée
+        self.menuWindows = self.menuBar().addMenu("Fenêtres")
 
     def _init_toolbar(self):
         self.toolbar = QtWidgets.QToolBar("Barre d'outils", self)
@@ -132,16 +136,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.left_splitter.setSizes([330, 470])
         self.left_splitter.setMinimumWidth(340)
 
-        self.maingraph = pg.GraphicsLayoutWidget()
-        # spectre (FFT) sous le graphique temporel, masqué tant que l'action FFT est décochée
-        self.fftgraph = pg.GraphicsLayoutWidget()
+        # graphiques, chacun déportable dans sa propre fenêtre (controller/detach_controller)
+        self.analoggraph = pg.GraphicsLayoutWidget()    # voies analogiques
+        self.logicgraph = pg.GraphicsLayoutWidget()     # voies logiques
+        self.fftgraph = pg.GraphicsLayoutWidget()       # spectre, si l'action FFT est cochée
         self.fftgraph.hide()
+        # affiché quand tous les graphiques sont déportés
+        self.graph_placeholder = QtWidgets.QLabel(
+            "Graphiques déportés dans leurs fenêtres\n(menu Fenêtres pour les réintégrer)")
+        self.graph_placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.graph_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        self.graph_splitter.addWidget(self.maingraph)
-        self.graph_splitter.addWidget(self.fftgraph)
-        self.graph_splitter.setStretchFactor(0, 3)
-        self.graph_splitter.setStretchFactor(1, 2)
-        self.actionFFT.toggled.connect(self._show_fft)
+        for widget in (self.analoggraph, self.logicgraph, self.fftgraph,
+                       self.graph_placeholder):
+            self.graph_splitter.addWidget(widget)
+        self.graph_splitter.setChildrenCollapsible(False)
         self.splitter.addWidget(self.left_splitter)
         self.splitter.addWidget(self.graph_splitter)
         self.splitter.setStretchFactor(0, 1)
@@ -159,13 +167,6 @@ class MainWindow(QtWidgets.QMainWindow):
             label.setContentsMargins(8, 0, 8, 0)
             bar.addPermanentWidget(label)
         self.stateLabel.setMinimumWidth(110)
-
-    def _show_fft(self, show: bool):
-        """Spectre affiché sous le graphique temporel (40 % de la hauteur)."""
-        self.fftgraph.setVisible(show)
-        if show:
-            total = max(sum(self.graph_splitter.sizes()), 1)
-            self.graph_splitter.setSizes([int(total * 0.6), total - int(total * 0.6)])
 
     def show_message(self, text: str, timeout_ms: int = 5000):
         self.statusBar().showMessage(text, timeout_ms)

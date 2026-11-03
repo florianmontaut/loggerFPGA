@@ -30,13 +30,20 @@ class LiveGraphController(QtCore.QObject):
     cursor_values = QtCore.pyqtSignal(dict)    # clé -> valeur sous le curseur
     fps_changed = QtCore.pyqtSignal(float)
     redrawn = QtCore.pyqtSignal()              # nouvelle trame dessinée (mesures à refaire)
+    # panneau utile ou non pour la configuration : "analog" / "logic", bool
+    availability_changed = QtCore.pyqtSignal(str, bool)
 
     REFRESH_HZ = 30
     LOGIC_HEIGHT = 0.8
 
-    def __init__(self, widget: pg.GraphicsLayoutWidget):
+    AXIS_WIDTH = 72        # axes de gauche de même largeur : échelles des temps alignées
+
+    def __init__(self, analog_widget: pg.GraphicsLayoutWidget,
+                 logic_widget: pg.GraphicsLayoutWidget):
         super().__init__()
-        self.widget = widget
+        # un widget par panneau : chacun peut être déporté dans sa propre fenêtre
+        self.analog_widget = analog_widget
+        self.logic_widget = logic_widget
         self.cfg: LoggerConfig | None = None
         self.frame: Frame | None = None
         self._dirty = False
@@ -54,6 +61,9 @@ class LiveGraphController(QtCore.QObject):
             plot.setDownsampling(auto=True, mode="peak")
             plot.setClipToView(True)
             plot.setLabel("bottom", "Temps", units="s")
+            plot.getAxis("left").setWidth(self.AXIS_WIDTH)
+        self.analog_widget.addItem(self.analog_plot, row=0, col=0)
+        self.logic_widget.addItem(self.logic_plot, row=0, col=0)
         self.logic_plot.setXLink(self.analog_plot)
         self.logic_plot.setMouseEnabled(x=True, y=False)
         self.legend = self.analog_plot.addLegend(offset=(-10, 10))
@@ -66,7 +76,7 @@ class LiveGraphController(QtCore.QObject):
         self.cursor.sigPositionChanged.connect(self._emit_cursor_values)
         self.analog_plot.addItem(self.cursor, ignoreBounds=True)
         self.cursor.hide()
-        self.widget.scene().sigMouseClicked.connect(self._on_click)
+        self.analog_widget.scene().sigMouseClicked.connect(self._on_click)
 
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._redraw)
@@ -81,10 +91,11 @@ class LiveGraphController(QtCore.QObject):
             (self.analog_plot if key[0] == "A" else self.logic_plot).removeItem(curve)
         self.curves.clear()
         self.legend.clear()
-        self.widget.clear()
+        self.availability_changed.emit("analog", bool(cfg.analog_signals))
+        self.availability_changed.emit("logic", cfg.has_logic)
+        self.logic_plot.setXLink(self.analog_plot if cfg.analog_signals else None)
 
         if cfg.analog_signals:
-            self.widget.addItem(self.analog_plot, row=0, col=0)
             for sig in cfg.analog_signals:
                 curve = self.analog_plot.plot(pen=pens.pen(pens.analog_color(sig)),
                                               name=cfg.analog_name(sig))
@@ -96,9 +107,6 @@ class LiveGraphController(QtCore.QObject):
             # échelle fixe de logger.m : multiple de 100 supérieur au gain maximal
             self._fixed_y = (np.floor(max_gain / 100) + 1) * 100 if max_gain >= 100 else max_gain
         if cfg.has_logic:
-            self.widget.addItem(self.logic_plot, row=1, col=0)
-            self.widget.ci.layout.setRowStretchFactor(0, 3)
-            self.widget.ci.layout.setRowStretchFactor(1, 2)
             for bit in range(16):
                 curve = self.logic_plot.plot(pen=pens.pen(pens.logic_color(bit)))
                 curve.setVisible(("L", bit) not in self.hidden)
@@ -107,7 +115,9 @@ class LiveGraphController(QtCore.QObject):
                 [[(b + self.LOGIC_HEIGHT / 2, cfg.logic_name(b)) for b in range(16)]])
             self.logic_plot.setYRange(-0.5, 16, padding=0)
             if not cfg.analog_signals:
-                self.logic_plot.setXLink(None)
+                span = cfg.frame_duration
+                self.logic_plot.setXRange(0, span, padding=0)
+                self.logic_plot.setLimits(xMin=-0.05 * span, xMax=1.05 * span)
 
         if self.threshold_line in self.analog_plot.items:
             self.analog_plot.removeItem(self.threshold_line)
