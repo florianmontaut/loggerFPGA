@@ -15,6 +15,7 @@ from __future__ import annotations
 import pyqtgraph.parametertree as ptree
 from PyQt6 import QtCore
 
+from model.frame_buffer import MAX_CAPACITY, frame_bytes
 from model.config import (LOGIC_SIGNAL, TRIGGER_LABELS, VALID_CHANNEL_COUNTS, ConfigError,
                           LoggerConfig, TriggerType)
 
@@ -94,6 +95,13 @@ class ConfigController(QtCore.QObject):
                 {"name": "Nombre de trames", "type": "int", "limits": (0, 10**9),
                  "value": cfg.max_frames, "tip": "0 : acquisition continue"},
             ]},
+            {"name": "Mémoire tampon", "type": "group", "children": [
+                {"name": "Trames gardées", "type": "int", "limits": (1, MAX_CAPACITY),
+                 "value": cfg.buffer_frames,
+                 "tip": "Dernières trames gardées en mémoire (onglet Trames), même sans "
+                        "enregistrement"},
+                {"name": "Mémoire nécessaire", "type": "str", "readonly": True, "value": ""},
+            ]},
             {"name": "Enregistrement", "type": "group", "children": [
                 {"name": "Dossier", "type": "file", "fileMode": "Directory",
                  "value": cfg.record_dir},
@@ -135,6 +143,7 @@ class ConfigController(QtCore.QObject):
                 self.p("Trigger", "Seuil (brut)").setValue(cfg.threshold)
                 self.p("Trigger", "Masque disjonction").setValue(f"0x{cfg.trip_mask:08X}")
                 self.p("Acquisition", "Nombre de trames").setValue(cfg.max_frames)
+                self.p("Mémoire tampon", "Trames gardées").setValue(cfg.buffer_frames)
                 self.p("Enregistrement", "Dossier").setValue(cfg.record_dir)
                 self.p("Enregistrement", "Préfixe").setValue(cfg.record_prefix)
                 self.p("Enregistrement", "Format").setValue(cfg.record_format)
@@ -163,6 +172,7 @@ class ConfigController(QtCore.QObject):
         except ValueError:
             raise ConfigError(f"Masque de disjonction invalide : {mask}") from None
         cfg.max_frames = self.p("Acquisition", "Nombre de trames").value()
+        cfg.buffer_frames = self.p("Mémoire tampon", "Trames gardées").value()
         cfg.record_dir = self.p("Enregistrement", "Dossier").value() or "."
         cfg.record_prefix = self.p("Enregistrement", "Préfixe").value()
         cfg.record_format = self.p("Enregistrement", "Format").value()
@@ -232,6 +242,10 @@ class ConfigController(QtCore.QObject):
             for name in ("Voie de seuil", "Seuil (brut)", "Seuil (physique)"):
                 self.p("Trigger", name).setOpts(visible=on_threshold)
             self.p("Trigger", "Masque disjonction").setOpts(visible=trig == TriggerType.TRIP)
+            if cfg.n_channels in VALID_CHANNEL_COUNTS:
+                total = frame_bytes(cfg) * cfg.buffer_frames
+                self.p("Mémoire tampon", "Mémoire nécessaire").setValue(
+                    f"{total / 1e6:.0f} Mo ({frame_bytes(cfg) / 1e3:.0f} ko par trame)")
             phys = cfg.threshold_physical()
             if phys is not None:
                 self.p("Trigger", "Seuil (physique)").setValue(phys)

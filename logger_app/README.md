@@ -77,7 +77,8 @@ logger_app/
 ├── model/
 │   ├── config.py                  LoggerConfig : paramètres, validation, JSON (ancien format accepté)
 │   ├── protocol.py                trames UDP (construction / décodage), Frame
-│   ├── recorder.py                enregistrement d'une trame (csv : temps + une colonne par voie, npz)
+│   ├── recorder.py                enregistrement : un fichier csv (colonne trame) + .json, ou npz
+│   ├── frame_buffer.py            mémoire tampon des dernières trames
 │   ├── spectrum.py                FFT : fenêtres, amplitudes calibrées, moyennage, pics, THD
 │   └── measures.py                mesures entre deux curseurs (Δt, Δy, min, max, moyenne, efficace)
 ├── controller/
@@ -87,6 +88,7 @@ logger_app/
 │   ├── channel_tree_controller.py arborescence des voies (visibilité, valeur sous le curseur)
 │   ├── graph_controller.py        graphique temps réel (analogique + logique, seuil, curseur)
 │   ├── fft_controller.py          spectre temps réel et réglages FFT
+│   ├── buffer_controller.py       onglet Trames : mémoire tampon, relecture, sauvegarde, confirmations
 │   ├── cursor_controller.py       curseurs de mesure (t1/t2, y1/y2) et mesures associées
 │   ├── detach_controller.py       graphiques déportables dans leur propre fenêtre (écran déporté)
 │   └── main_controller.py         câblage des contrôleurs et de la vue
@@ -119,10 +121,10 @@ ChannelTreeController ──visibility_changed──> LiveGraphController.set_vi
 | `thres` + voie en 1re position | *Trigger › Voie de seuil* : la voie choisie est **placée en tête de la liste** ; *Seuil (brut)* ou *Seuil (physique)* (converti avec le gain de la voie) ; ligne du seuil sur le graphique ; « (seuil) » dans l'arborescence |
 | `frame_nb` | *Acquisition › Nombre de trames* (0 = infini) ; bouton *Trame unique* (F6) |
 | `pl` | toujours actif ; *Figer* (F8) fige l'affichage sans arrêter l'acquisition |
-| `wr`, `pre`, `ch_name` | bouton *Enregistrer* (à tout moment, même pendant l'acquisition) + *Enregistrement › Dossier / Préfixe / Format* ; noms `pre_voies_div_N_n.csv`, numérotation poursuivie d'une acquisition à l'autre comme `fnum` |
+| `wr`, `pre`, `ch_name` | bouton *Enregistrer* (à tout moment, même pendant l'acquisition) + *Enregistrement › Dossier / Préfixe / Format* ; un seul fichier par enregistrement avec une colonne `trame`, au lieu d'un fichier par trame |
 | `ch_gain` | *Description des voies › Gain (valeur à 1 pu)*, comme `ch_gain` : valeur = brut / 16384 × gain |
 | `ylim` fixe | *Échelle auto* décochée : ±(multiple de 100 au-dessus du gain max) |
-| `title(frame, Mo)` | titre du graphique ; compteurs de trames et d'erreurs dans la barre d'état |
+| `title(frame, Mo)` | titre du graphique (numéro de trame) ; compteurs de trames et d'erreurs dans la barre d'état |
 | `kbhit` / clic sur la figure | bouton *Arrêter* (F7) ; `stop_msg` envoyé à l'arrêt |
 | `arp-ping` | non repris : l'absence de réponse est signalée dans la barre d'état (« sans réponse »), et `start_msg` est renvoyé toutes les 2 s en trigger automatique |
 
@@ -147,22 +149,77 @@ Graphique : un double-clic place le curseur vertical. La colonne *Valeur* de
 l'arborescence donne alors la valeur de chaque voie sous le curseur (sans curseur : le
 dernier point de la trame). Les cases à cocher masquent ou affichent les courbes.
 
+### Mémoire tampon et navigation dans les trames
+
+Comme dans PicoScope 7, les **dernières trames reçues restent en mémoire**, même sans
+enregistrement : 64 par défaut, réglable dans *Mémoire tampon › Trames gardées*. La
+mémoire nécessaire est affichée : de 160 à 230 ko par trame selon les voies, soit 10 à
+15 Mo pour 64 trames (maximum réglable : 5 000 trames).
+
+* **Onglet Trames**, à côté de l'onglet Voies : une ligne par trame, avec une vignette
+  de la première voie, son numéro, son heure de capture, et ✓ si elle est enregistrée sur
+  disque. Le compteur indique les trames en mémoire et celles qui ne sont pas encore
+  enregistrées.
+* **Relecture** : un clic sur une trame l'affiche. Graphiques, FFT, curseurs et
+  valeurs de l'arborescence suivent. Le titre indique « mémoire tampon ». L'acquisition
+  continue en arrière-plan et la mémoire tampon se remplit, mais l'affichage reste sur la
+  trame choisie. Si elle sort de la mémoire tampon pendant la relecture, elle reste
+  affichée et c'est signalé.
+* **Navigation** : *Trame précédente* (Alt+←), *Trame suivante* (Alt+→), *Direct*
+  (Alt+Fin). Ces raccourcis sont aussi actifs dans les fenêtres déportées. Depuis le
+  direct, Alt+← affiche l'avant-dernière trame. Après la dernière, Alt+→ revient au
+  direct.
+* **Numérotation** : les numéros continuent d'une acquisition à l'autre, chaque trame a
+  donc un numéro unique, dans la mémoire tampon comme dans les fichiers.
+* **Sauvegarde** : *Fichier › Enregistrer la mémoire tampon...* (Ctrl+Maj+S, ou bouton
+  de l'onglet) enregistre toutes les trames dans un seul fichier. Le menu contextuel de
+  la liste enregistre seulement la sélection (Ctrl/Maj+clic).
+* **Avant de quitter**, s'il reste des trames non enregistrées, l'application propose
+  *Enregistrer*, *Ne pas enregistrer* ou *Annuler*. Même question avant une acquisition
+  avec une autre disposition de voies (voies ou diviseur différents) : elle vide la
+  mémoire tampon, car toutes ses trames doivent pouvoir être affichées par le même
+  graphique et enregistrées dans le même fichier.
+
+![mémoire tampon](docs/capture_memoire_tampon.png)
+
 ### Enregistrement des trames
 
-* **Pendant l'acquisition**, le bouton *Enregistrer* démarre l'enregistrement dès la
-  trame suivante. Un second clic l'arrête. La barre d'état affiche « ● REC » et le
-  dossier utilisé.
-* **À l'arrêt**, le bouton arme l'enregistrement pour le prochain *Démarrer* ou la
-  prochaine *Trame unique*.
-* **Dossier** : par défaut `Documents/LoggerFPGA`, modifiable dans
-  *Enregistrement › Dossier*. Un chemin relatif ou « . » (dossier courant, qui dépend de
-  la façon dont le programme est lancé) n'est plus utilisé tel quel. *Acquisition ›
-  Ouvrir le dossier d'enregistrement* l'affiche dans l'explorateur.
-* **Numérotation** : elle reprend après le plus grand numéro déjà présent pour le même
-  préfixe, les mêmes voies et le même diviseur. Une nouvelle acquisition n'écrase donc
-  jamais les fichiers de la précédente.
+**Format** : un seul fichier par enregistrement (auparavant, un fichier par trame).
+
+```
+enr_I_HV_V_PH1_INV2_Logic_div_20_20261103-143012.csv
+trame,temps_s,I_HV (V),V_PH1_INV2 (V),K_HV,K_PRE,L2,...
+12,0,57.31,-12.08,0,1,0,...
+12,8e-07,57.42,-12.11,0,1,0,...
+...
+13,0,...
+```
+
+* `trame` : numéro de la trame (le même que dans le titre du graphique et dans l'onglet
+  Trames) ; `temps_s` : temps depuis le début de la trame.
+* À côté, `<même nom>.json` décrit l'enregistrement : configuration complète (voies,
+  gains, diviseur, trigger…), fréquence d'échantillonnage et, pour chaque trame, son
+  numéro et son heure de capture.
+* Le CSV est écrit au fil de l'eau : il reste lisible même si l'application s'arrête
+  brutalement.
+* Le format npz contient les mêmes données en tableaux numpy (`trame`, `timestamp`,
+  `time`, `analog` [trames × points × voies], `logic`, `raw`). Il est écrit à la fin de
+  l'enregistrement.
+* Un fichier existant n'est jamais écrasé (suffixe `_2`, `_3`…).
+
+**Bouton Enregistrer**
+
+* **Pendant l'acquisition**, il ouvre un fichier et y ajoute chaque trame dès la
+  suivante. Un second clic ferme le fichier. La barre d'état affiche « ● REC ».
+* **À l'arrêt**, il arme l'enregistrement pour le prochain *Démarrer* ou la prochaine
+  *Trame unique*.
+* **Dossier** : par défaut `Documents/LoggerFPGA`, modifiable dans *Enregistrement ›
+  Dossier* ; *Acquisition › Ouvrir le dossier d'enregistrement* l'affiche.
 * **En cas d'erreur** (dossier non accessible en écriture, disque plein…), un message
   s'affiche et le bouton se décoche. L'acquisition continue sans enregistrer.
+
+Les trames enregistrées par ce bouton sont marquées ✓ dans la mémoire tampon : elles ne
+sont pas proposées à nouveau avant de quitter.
 
 ### Curseurs de mesure
 
@@ -272,7 +329,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-55 tests : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, acquisition complète contre le
+63 tests : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes

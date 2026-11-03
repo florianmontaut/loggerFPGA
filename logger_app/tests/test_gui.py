@@ -39,7 +39,7 @@ def setup(qapp):
                        local_ip="127.0.0.1", local_port=23302, signals=[1, 4, 6, 15],
                        units=["V"] * 15)
     window = MainWindow()
-    ctrl = MainController(window, cfg, remember=False)
+    ctrl = MainController(window, cfg, remember=False, confirm_quit=False)
     window.show()
     yield qapp, sim, window, ctrl
     ctrl.quit()
@@ -296,36 +296,39 @@ def test_logic_only_config_hides_analog(setup):
 def test_record_button_during_acquisition(setup, tmp_path, monkeypatch):
     qapp, sim, window, ctrl = setup
     ctrl.config_ctrl.p("Enregistrement", "Dossier").setValue(str(tmp_path))
-    files = lambda: sorted(p.name for p in tmp_path.iterdir())
+    csvs = lambda: sorted(p for p in tmp_path.iterdir() if p.suffix == ".csv")
+    trames = lambda path: set(np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)[:, 0])
     assert window.actionRecord.isEnabled()
     window.actionStart.trigger()
     assert wait(qapp, lambda: ctrl.graph_ctrl.frame is not None)
-    assert files() == []
-    # clic sur Enregistrer pendant l'acquisition : enregistrement immédiat
+    assert csvs() == []
+    # clic sur Enregistrer pendant l'acquisition : un fichier, qui grandit trame après trame
     assert window.actionRecord.isEnabled()
     window.actionRecord.trigger()
-    assert wait(qapp, lambda: len(files()) >= 2)
+    assert wait(qapp, lambda: csvs() and len(trames(csvs()[0])) >= 2)
     assert window.recordLabel.text() == "● REC"
     assert str(tmp_path) in window.statusBar().currentMessage()
-    # second clic : plus aucun fichier
+    # second clic : fichier fermé, plus rien n'y est ajouté
     window.actionRecord.trigger()
     assert wait(qapp, lambda: window.recordLabel.text() == "")
-    n = len(files())
+    first = csvs()[0]
+    n = len(trames(first))
     wait(qapp, lambda: False, 0.3)
-    assert len(files()) == n
+    assert len(trames(first)) == n
     window.actionStop.trigger()
     assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
 
-    # armé à l'arrêt, puis Démarrer : numérotation reprise, rien d'écrasé
+    # armé à l'arrêt, puis Démarrer : nouveau fichier, numéros de trame qui continuent
     window.actionRecord.trigger()
     assert window.actionRecord.isChecked() and window.recordLabel.text() == ""
     assert "armé" in window.statusBar().currentMessage()
     window.actionStart.trigger()
-    assert wait(qapp, lambda: len(files()) >= n + 2)
+    assert wait(qapp, lambda: len(csvs()) == 2 and len(trames(csvs()[1])) >= 2)
     window.actionStop.trigger()
     assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
-    numbers = sorted(int(f.rsplit("_", 1)[1].split(".")[0]) for f in files())
-    assert numbers == list(range(1, len(numbers) + 1))
+    second = [p for p in csvs() if p != first][0]
+    assert min(trames(second)) > max(trames(first))      # numérotation continue
+    assert len(trames(first)) == n                       # premier fichier intact
     assert window.recordLabel.text() == "" and window.actionRecord.isChecked()
 
 
@@ -351,3 +354,122 @@ def test_default_record_dir(qapp):
     from controller.main_controller import default_record_dir, resolve_record_dir
     assert resolve_record_dir(LoggerConfig(record_dir=".")).record_dir == default_record_dir()
     assert os.path.isabs(resolve_record_dir(LoggerConfig(record_dir="rel")).record_dir)
+
+
+def _fill_buffer(qapp, window, ctrl, n):
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: len(ctrl.buffer_ctrl.buffer) >= n)
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+
+
+def test_buffer_navigation(setup):
+    qapp, sim, window, ctrl = setup
+    buf = ctrl.buffer_ctrl
+    ctrl.config_ctrl.p("Mémoire tampon", "Trames gardées").setValue(6)
+    assert "Mo" in ctrl.config_ctrl.p("Mémoire tampon", "Mémoire nécessaire").value()
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: len(buf.buffer) == 6 and buf.buffer[0].index > 1)
+    assert window.framesList.count() == 6            # anneau : les plus anciennes sortent
+    assert [buf.buffer[i].index for i in range(6)] == [
+        int(window.framesList.item(i).text().split()[1]) for i in range(6)]
+    assert not window.framesList.item(0).icon().isNull()
+
+    # clic sur une trame : relecture, le direct continue de remplir la mémoire tampon
+    window.framesList.setCurrentRow(2)
+    chosen = buf.reviewing
+    assert chosen is buf.buffer[2]
+    wait(qapp, lambda: False, 0.3)
+    assert ctrl.graph_ctrl.frame is chosen
+    assert "mémoire tampon" in ctrl.graph_ctrl.analog_plot.titleLabel.text
+    assert "Relecture" in window.bufferLabel.text()
+    assert buf.buffer.latest.index > chosen.index
+    # sortie de l'anneau (6 trames) pendant la relecture : toujours affichée, signalée
+    assert wait(qapp, lambda: buf.buffer.position(chosen) == -1)
+    wait(qapp, lambda: False, 0.1)
+    assert buf.reviewing is chosen and ctrl.graph_ctrl.frame is chosen
+    assert "n'est plus en mémoire tampon" in window.bufferLabel.text()
+    window.framesList.setCurrentRow(2)
+    chosen = buf.reviewing
+
+    # navigation clavier : Alt+← / Alt+→ / Alt+Fin
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+    window.actionPrevFrame.trigger()
+    assert ctrl.graph_ctrl.frame is buf.buffer[buf.buffer.position(chosen) - 1] or \
+        buf.buffer.position(chosen) <= 0
+    pos = buf.buffer.position(buf.reviewing)
+    window.actionNextFrame.trigger()
+    assert buf.buffer.position(buf.reviewing) == pos + 1
+    window.actionLiveFrame.trigger()
+    assert buf.live and not window.actionLiveFrame.isEnabled()
+    wait(qapp, lambda: False, 0.1)
+    assert ctrl.graph_ctrl.frame is buf.buffer.latest
+    # depuis le direct, Alt+← remonte à l'avant-dernière trame
+    window.actionPrevFrame.trigger()
+    assert buf.reviewing is buf.buffer[len(buf.buffer) - 2]
+    window.tree_tabs.setCurrentIndex(1)
+    wait(qapp, lambda: False, 0.1)
+    assert "Trame %d  —  mémoire tampon" % buf.reviewing.index in \
+        ctrl.graph_ctrl.analog_plot.titleLabel.text
+    window.grab().save(str(SHOTS / "logger_buffer.png"))
+
+    # mémoire réduite : les plus anciennes sont retirées de la liste
+    ctrl.config_ctrl.p("Mémoire tampon", "Trames gardées").setValue(2)
+    assert len(buf.buffer) == 2 and window.framesList.count() == 2
+
+
+def test_save_buffer_single_file(setup, tmp_path, monkeypatch):
+    qapp, sim, window, ctrl = setup
+    _fill_buffer(qapp, window, ctrl, 4)
+    buf = ctrl.buffer_ctrl
+    target = tmp_path / "tampon.csv"
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        lambda *a, **k: (str(target), "CSV (*.csv)"))
+    assert "non enregistrée" in window.bufferLabel.text()
+    window.actionSaveBuffer.trigger()
+    table = np.loadtxt(target, delimiter=",", skiprows=1)
+    assert list(np.unique(table[:, 0])) == [f.index for f in buf.buffer]
+    assert target.with_suffix(".json").exists()
+    assert buf.buffer.unsaved() == [] and "✓" in window.framesList.item(0).text()
+    assert "non enregistrée" not in window.bufferLabel.text()
+    # sélection seulement (menu contextuel de la liste)
+    window.framesList.item(1).setSelected(True)
+    window.framesList.item(2).setSelected(True)
+    target = tmp_path / "selection.npz"
+    buf.save_selection_action.trigger()
+    assert list(np.load(target)["trame"]) == [buf.buffer[1].index, buf.buffer[2].index]
+
+
+def test_quit_asks_to_save_unsaved_frames(setup, monkeypatch):
+    qapp, sim, window, ctrl = setup
+    _fill_buffer(qapp, window, ctrl, 2)
+    buf = ctrl.buffer_ctrl
+    asked = []
+    answer = {"value": "cancel"}
+    monkeypatch.setattr(buf, "_ask", lambda text: asked.append(text) or answer["value"])
+    window.close_guard = buf.confirm_quit
+    assert not window.close()                       # Annuler : la fenêtre reste ouverte
+    assert window.isVisible() and "quitter" in asked[0]
+    answer["value"] = "discard"
+    assert window.close()                           # Ne pas enregistrer : fermeture
+
+
+def test_new_channel_layout_asks_before_clearing_buffer(setup, monkeypatch):
+    qapp, sim, window, ctrl = setup
+    _fill_buffer(qapp, window, ctrl, 2)
+    buf = ctrl.buffer_ctrl
+    n = len(buf.buffer)
+    monkeypatch.setattr(buf, "_ask", lambda text: "cancel")
+    ctrl.config_ctrl.p("Voies", "Voie 2").setValue(7)
+    window.actionStart.trigger()                    # annulé : rien ne démarre
+    assert not ctrl.acq_ctrl.running and len(buf.buffer) == n
+    # relire une trame de l'ancienne configuration remet l'affichage à cette configuration
+    window.framesList.setCurrentRow(0)
+    assert ctrl.graph_ctrl.cfg.signals == [1, 4, 6, 15]
+    monkeypatch.setattr(buf, "_ask", lambda text: "discard")
+    ctrl.config_ctrl.p("Voies", "Voie 2").setValue(7)
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: len(buf.buffer) >= 1 and buf.buffer.cfg.signals == [1, 7, 6, 15])
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)

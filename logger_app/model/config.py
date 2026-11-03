@@ -77,6 +77,8 @@ class LoggerConfig:
     record_dir:     str = "."
     record_prefix:  str = "enr"
     record_format:  str = "csv"      # "csv" ou "npz"
+    # mémoire tampon : nombre de trames gardées en mémoire (model/frame_buffer.py)
+    buffer_frames:  int = 64
     # --- description des voies ---
     analog_names:   list[str] = field(default_factory=lambda: list(DEFAULT_ANALOG_NAMES))
     logic_names:    list[str] = field(default_factory=lambda: list(DEFAULT_LOGIC_NAMES))

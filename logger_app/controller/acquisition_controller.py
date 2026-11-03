@@ -32,6 +32,8 @@ class AcquisitionController(QtCore.QObject):
     def __init__(self):
         super().__init__()
         self.worker: AcquisitionWorker | None = None
+        # numéro de la prochaine trame : continu d'une acquisition à l'autre
+        self.next_index = 1
         self._pending: tuple[LoggerConfig, bool] | None = None
 
     @property
@@ -47,8 +49,8 @@ class AcquisitionController(QtCore.QObject):
             self._pending = (cfg, False)
             self.stop()
             return
-        self.worker = AcquisitionWorker(cfg)
-        self.worker.frame_ready.connect(self.frame_ready)
+        self.worker = AcquisitionWorker(cfg, first_index=self.next_index)
+        self.worker.frame_ready.connect(self._on_frame)
         self.worker.status.connect(self.status)
         self.worker.error.connect(self.error)
         self.worker.state_changed.connect(self.state_changed)
@@ -66,6 +68,10 @@ class AcquisitionController(QtCore.QObject):
             return False
         self.worker.set_recording(enabled, record_dir, prefix, fmt)
         return True
+
+    def _on_frame(self, frame):
+        self.next_index = max(self.next_index, frame.index + 1)
+        self.frame_ready.emit(frame)
 
     def stop(self):
         if self.worker is not None:

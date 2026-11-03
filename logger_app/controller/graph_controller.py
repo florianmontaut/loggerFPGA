@@ -163,6 +163,13 @@ class LiveGraphController(QtCore.QObject):
         if self.paused:
             return
         self.frame = frame
+        self._title_suffix = ""
+        self._dirty = True
+
+    def show_frame(self, frame: Frame, title_suffix: str = ""):
+        """Affiche une trame donnée (mémoire tampon), même si l'affichage est figé."""
+        self.frame = frame
+        self._title_suffix = title_suffix
         self._dirty = True
 
     def _redraw(self):
@@ -181,8 +188,10 @@ class LiveGraphController(QtCore.QObject):
                 if curve is not None:
                     curve.setData(t, bit + self.LOGIC_HEIGHT * frame.logic[:, bit],
                                   skipFiniteCheck=True)
-        mo = frame.index * frame.raw.size * 2 / 1048576
-        self.analog_plot.setTitle(f"Trame {frame.index}  -  {mo:.2f} Mo")
+        title = f"Trame {frame.index}" + getattr(self, "_title_suffix", "")
+        self.analog_plot.setTitle(title)
+        if not self.cfg.analog_signals:
+            self.logic_plot.setTitle(title)
         self._emit_cursor_values()
         self.redrawn.emit()
         self._count_fps()
