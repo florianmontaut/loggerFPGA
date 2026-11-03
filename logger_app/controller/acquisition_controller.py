@@ -26,6 +26,8 @@ class AcquisitionController(QtCore.QObject):
     stats_changed = QtCore.pyqtSignal(dict)
     running_changed = QtCore.pyqtSignal(bool)
     started_with = QtCore.pyqtSignal(object)     # configuration du worker lancé
+    recording_changed = QtCore.pyqtSignal(bool, str)
+    recording_failed = QtCore.pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -51,10 +53,19 @@ class AcquisitionController(QtCore.QObject):
         self.worker.error.connect(self.error)
         self.worker.state_changed.connect(self.state_changed)
         self.worker.stats_changed.connect(self.stats_changed)
+        self.worker.recording_changed.connect(self.recording_changed)
+        self.worker.recording_failed.connect(self.recording_failed)
         self.worker.finished.connect(self._on_finished)
         self.started_with.emit(cfg.copy())
         self.worker.start()
         self.running_changed.emit(True)
+
+    def set_recording(self, enabled: bool, record_dir: str, prefix: str, fmt: str) -> bool:
+        """Enregistrement démarré / arrêté pendant l'acquisition ; False si elle est arrêtée."""
+        if not self.running:
+            return False
+        self.worker.set_recording(enabled, record_dir, prefix, fmt)
+        return True
 
     def stop(self):
         if self.worker is not None:

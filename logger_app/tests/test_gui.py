@@ -291,3 +291,63 @@ def test_logic_only_config_hides_analog(setup):
     assert not window.analoggraph.isVisible() and window.logicgraph.isVisible()
     ctrl.config_ctrl.p("Voies", "Voie 1").setValue(2)
     assert window.analoggraph.isVisible() and not window.logicgraph.isVisible()
+
+
+def test_record_button_during_acquisition(setup, tmp_path, monkeypatch):
+    qapp, sim, window, ctrl = setup
+    ctrl.config_ctrl.p("Enregistrement", "Dossier").setValue(str(tmp_path))
+    files = lambda: sorted(p.name for p in tmp_path.iterdir())
+    assert window.actionRecord.isEnabled()
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: ctrl.graph_ctrl.frame is not None)
+    assert files() == []
+    # clic sur Enregistrer pendant l'acquisition : enregistrement immédiat
+    assert window.actionRecord.isEnabled()
+    window.actionRecord.trigger()
+    assert wait(qapp, lambda: len(files()) >= 2)
+    assert window.recordLabel.text() == "● REC"
+    assert str(tmp_path) in window.statusBar().currentMessage()
+    # second clic : plus aucun fichier
+    window.actionRecord.trigger()
+    assert wait(qapp, lambda: window.recordLabel.text() == "")
+    n = len(files())
+    wait(qapp, lambda: False, 0.3)
+    assert len(files()) == n
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+
+    # armé à l'arrêt, puis Démarrer : numérotation reprise, rien d'écrasé
+    window.actionRecord.trigger()
+    assert window.actionRecord.isChecked() and window.recordLabel.text() == ""
+    assert "armé" in window.statusBar().currentMessage()
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: len(files()) >= n + 2)
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+    numbers = sorted(int(f.rsplit("_", 1)[1].split(".")[0]) for f in files())
+    assert numbers == list(range(1, len(numbers) + 1))
+    assert window.recordLabel.text() == "" and window.actionRecord.isChecked()
+
+
+def test_record_failure_unchecks_button(setup, tmp_path, monkeypatch):
+    qapp, sim, window, ctrl = setup
+    warnings = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                        lambda *args: warnings.append(args[2]))
+    blocker = tmp_path / "fichier"
+    blocker.write_text("x")
+    ctrl.config_ctrl.p("Enregistrement", "Dossier").setValue(str(blocker / "sous_dossier"))
+    window.actionRecord.setChecked(True)
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: warnings)
+    assert "Enregistrement impossible" in warnings[0]
+    assert not window.actionRecord.isChecked()
+    assert ctrl.acq_ctrl.running                  # l'acquisition continue sans enregistrer
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+
+
+def test_default_record_dir(qapp):
+    from controller.main_controller import default_record_dir, resolve_record_dir
+    assert resolve_record_dir(LoggerConfig(record_dir=".")).record_dir == default_record_dir()
+    assert os.path.isabs(resolve_record_dir(LoggerConfig(record_dir="rel")).record_dir)

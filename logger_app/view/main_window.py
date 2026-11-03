@@ -70,6 +70,9 @@ class MainWindow(QtWidgets.QMainWindow):
                                         icon=sp.SP_MediaPause)
         self.actionRecord = self._action("Enregistrer", "Enregistrer chaque trame sur disque",
                                          checkable=True, icon=sp.SP_DialogSaveButton)
+        self.actionOpenRecordDir = self._action("Ouvrir le dossier d'enregistrement",
+                                                "Afficher les fichiers enregistrés",
+                                                icon=sp.SP_DirOpenIcon)
         self.actionAutoRange = self._action("Échelle auto", "Adapter l'échelle à chaque trame",
                                             checkable=True, icon=sp.SP_BrowserReload)
         self.actionAutoRange.setChecked(True)
@@ -95,7 +98,7 @@ class MainWindow(QtWidgets.QMainWindow):
         menu = self.menuBar().addMenu("Acquisition")
         menu.addActions([self.actionStart, self.actionSingle, self.actionStop])
         menu.addSeparator()
-        menu.addActions([self.actionRecord])
+        menu.addActions([self.actionRecord, self.actionOpenRecordDir])
         menu = self.menuBar().addMenu("Affichage")
         menu.addActions([self.actionPause, self.actionAutoRange])
         menu.addSeparator()
@@ -163,7 +166,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.framesLabel = QtWidgets.QLabel("Trames : 0")
         self.errorsLabel = QtWidgets.QLabel("Erreurs : 0")
         self.fpsLabel = QtWidgets.QLabel("")
-        for label in (self.stateLabel, self.framesLabel, self.errorsLabel, self.fpsLabel):
+        # enregistrement en cours (vide sinon)
+        self.recordLabel = QtWidgets.QLabel("")
+        self.recordLabel.setStyleSheet("color: #d62728; font-weight: bold;")
+        for label in (self.recordLabel, self.stateLabel, self.framesLabel, self.errorsLabel, self.fpsLabel):
             label.setContentsMargins(8, 0, 8, 0)
             bar.addPermanentWidget(label)
         self.stateLabel.setMinimumWidth(110)

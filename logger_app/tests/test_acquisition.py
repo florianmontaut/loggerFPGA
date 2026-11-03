@@ -120,3 +120,26 @@ def test_trigger_during_tempo_is_not_lost(app, monkeypatch):
         timeout=8)
     assert not errors
     assert len(frames) == 1
+
+
+def test_recorder_numbering_continues(tmp_path):
+    """Une nouvelle acquisition n'écrase pas les fichiers de la précédente."""
+    from model.protocol import encode_payload, make_frame
+    from model.recorder import FrameRecorder
+    cfg = LoggerConfig(signals=[2], record_dir=str(tmp_path), record_prefix="essai")
+    frame = make_frame(encode_payload(np.zeros((16384, 1), dtype=np.int16)), cfg, 1)
+    first = FrameRecorder(cfg)
+    paths = [first.write(frame), first.write(frame)]
+    (tmp_path / "essai_V_PH1_INV1_div_20_7.npz").write_bytes(b"")   # autre format : ignoré
+    second = FrameRecorder(cfg)
+    paths.append(second.write(frame))
+    assert [p.rsplit("_", 1)[1] for p in paths] == ["1.csv", "2.csv", "3.csv"]
+    assert second.directory == str(tmp_path)
+
+
+def test_recorder_unwritable_dir(tmp_path):
+    from model.recorder import FrameRecorder
+    blocker = tmp_path / "fichier"
+    blocker.write_text("x")                      # un fichier à la place du dossier
+    with pytest.raises(OSError):
+        FrameRecorder(LoggerConfig(record_dir=str(blocker / "sous_dossier")))

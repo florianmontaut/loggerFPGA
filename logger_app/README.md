@@ -119,7 +119,7 @@ ChannelTreeController ──visibility_changed──> LiveGraphController.set_vi
 | `thres` + voie en 1re position | *Trigger › Voie de seuil* : la voie choisie est **placée en tête de la liste** ; *Seuil (brut)* ou *Seuil (physique)* (converti avec le gain de la voie) ; ligne du seuil sur le graphique ; « (seuil) » dans l'arborescence |
 | `frame_nb` | *Acquisition › Nombre de trames* (0 = infini) ; bouton *Trame unique* (F6) |
 | `pl` | toujours actif ; *Figer* (F8) fige l'affichage sans arrêter l'acquisition |
-| `wr`, `pre`, `ch_name` | bouton *Enregistrer* + *Enregistrement › Dossier / Préfixe / Format* ; noms `pre_voies_div_N_n.csv` |
+| `wr`, `pre`, `ch_name` | bouton *Enregistrer* (à tout moment, même pendant l'acquisition) + *Enregistrement › Dossier / Préfixe / Format* ; noms `pre_voies_div_N_n.csv`, numérotation poursuivie d'une acquisition à l'autre comme `fnum` |
 | `ch_gain` | *Description des voies › Gain (valeur à 1 pu)*, comme `ch_gain` : valeur = brut / 16384 × gain |
 | `ylim` fixe | *Échelle auto* décochée : ±(multiple de 100 au-dessus du gain max) |
 | `title(frame, Mo)` | titre du graphique ; compteurs de trames et d'erreurs dans la barre d'état |
@@ -146,6 +146,23 @@ valeur à 1 pu.
 Graphique : un double-clic place le curseur vertical. La colonne *Valeur* de
 l'arborescence donne alors la valeur de chaque voie sous le curseur (sans curseur : le
 dernier point de la trame). Les cases à cocher masquent ou affichent les courbes.
+
+### Enregistrement des trames
+
+* **Pendant l'acquisition**, le bouton *Enregistrer* démarre l'enregistrement dès la
+  trame suivante. Un second clic l'arrête. La barre d'état affiche « ● REC » et le
+  dossier utilisé.
+* **À l'arrêt**, le bouton arme l'enregistrement pour le prochain *Démarrer* ou la
+  prochaine *Trame unique*.
+* **Dossier** : par défaut `Documents/LoggerFPGA`, modifiable dans
+  *Enregistrement › Dossier*. Un chemin relatif ou « . » (dossier courant, qui dépend de
+  la façon dont le programme est lancé) n'est plus utilisé tel quel. *Acquisition ›
+  Ouvrir le dossier d'enregistrement* l'affiche dans l'explorateur.
+* **Numérotation** : elle reprend après le plus grand numéro déjà présent pour le même
+  préfixe, les mêmes voies et le même diviseur. Une nouvelle acquisition n'écrase donc
+  jamais les fichiers de la précédente.
+* **En cas d'erreur** (dossier non accessible en écriture, disque plein…), un message
+  s'affiche et le bouton se décoche. L'acquisition continue sans enregistrer.
 
 ### Curseurs de mesure
 
@@ -255,7 +272,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-50 tests : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, acquisition complète contre le
+55 tests : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes
