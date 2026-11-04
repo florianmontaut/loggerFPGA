@@ -91,3 +91,31 @@ def test_noise_peaks_ignored():
     freq, amp = spectrum.amplitude_spectrum(y, FS, "hann")
     peaks = spectrum.find_peaks(freq, amp, 10, "hann")
     assert [round(p.frequency, -3) for p in peaks] == [10000, 25000]
+
+
+def test_fast_length_and_awkward_sizes():
+    assert spectrum.fast_length(8192) == 8192
+    assert 1_990_001 <= spectrum.fast_length(1_990_001) <= 2_000_000
+    for n in (7, 97, 1001, 12_289):
+        m = spectrum.fast_length(n)
+        assert m >= n
+        k = m
+        for p in (2, 3, 5):
+            while k % p == 0:
+                k //= p
+        assert k == 1
+    # longueur première : amplitude toujours calibrée (flattop), fréquence retrouvée
+    n = 10_007
+    f = 1234.5
+    y = 2.0 * np.sin(2 * np.pi * f * np.arange(n) / FS)
+    freq, amp = spectrum.amplitude_spectrum(y, FS, "flattop")
+    peak = spectrum.find_peaks(freq, amp, 1, "flattop")[0]
+    assert peak.amplitude == pytest.approx(2.0, rel=3e-3)
+    assert peak.frequency == pytest.approx(f, rel=2e-3)
+
+
+def test_large_window_single_precision_close_to_exact():
+    n = 200_000
+    exact = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(n) / n)
+    np.testing.assert_allclose(spectrum.window("hann", n), exact, atol=2e-6)
+    assert spectrum.window("hann", n).sum() == pytest.approx(n / 2, rel=1e-6)

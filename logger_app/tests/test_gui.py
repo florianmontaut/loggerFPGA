@@ -636,8 +636,8 @@ def test_open_recording(setup, tmp_path, monkeypatch):
     qapp, sim, window, ctrl = setup
     buf = ctrl.buffer_ctrl
     path, original = _recording(tmp_path, [1, 4, 6, 15], [21, 22, 23])
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
-                        lambda *a, **k: (path, ""))
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileNames",
+                        lambda *a, **k: ([path], ""))
     window.actionOpenRecording.trigger()
     assert [f.index for f in buf.buffer] == [21, 22, 23]
     assert window.framesList.count() == 3 and window.tree_tabs.currentIndex() == 1
@@ -716,3 +716,125 @@ def test_longer_frame_not_clipped_to_previous_duration(setup):
     assert plot.vb.viewRange()[0][1] == pytest.approx(4096 / 1.25e6)
     ctrl.config_ctrl.p("Échantillonnage", "Diviseur").setValue(500)
     assert plot.vb.viewRange()[0][1] == pytest.approx(4096 / 50e3)
+
+
+# ------------------------------------------------------------------ oscilloscope
+
+def _tek_csv(path, n=120_000, dt=1e-6, t0=-0.01):
+    """CSV Tektronix : métadonnées colonnes 0-2, temps, 2 voies (sinus 1 kHz, rampe)."""
+    t = t0 + np.arange(n) * dt
+    s1 = np.sin(2 * np.pi * 1000 * t)
+    s2 = np.linspace(-1, 1, n)
+    meta = [('"Record Length"', f"{n}", '"Points"'), ('"Sample Interval"', f"{dt:.8e}", "s"),
+            ('"Trigger Point"', "10000", '"Samples"'), ('"Trigger Time"', "0", "s")]
+    with open(path, "w") as f:
+        for i in range(n):
+            m = meta[i] if i < len(meta) else ("", "", "")
+            f.write(f"{m[0]},{m[1]},{m[2]},{t[i]:.8e},{s1[i]:.8e},{s2[i]:.8e}\n")
+    return str(path), t, s1, s2
+
+
+def _open_scope(qapp, ctrl, paths):
+    assert ctrl.open_files(paths)
+    assert ctrl.scope_ctrl.wait_import()
+    assert wait(qapp, lambda: ctrl.scope_ctrl.active and ctrl.graph_ctrl.frame is not None)
+    wait(qapp, lambda: False, 0.2)
+
+
+def test_scope_record_mode(setup, tmp_path):
+    qapp, sim, window, ctrl = setup
+    scope = ctrl.scope_ctrl
+    scope.max_raw = 20_000                       # enregistrement de 120 000 points
+    path, t, s1, s2 = _tek_csv(tmp_path / "dpo.csv")
+    window.actionFFT.setChecked(True)
+    ctrl.math_ctrl.add()
+    ctrl.math_ctrl._groups()[0].child("Formule").setValue("[CH1]*[CH2]")
+    _open_scope(qapp, ctrl, [path])
+    assert (tmp_path / "dpo.h5").exists()
+    assert window.overviewgraph.isVisible() and window.actionCloseScope.isEnabled()
+    root = ctrl.tree_ctrl.model.item(0)
+    assert root.text() == "dpo.h5" and ("A", 0) in ctrl.tree_ctrl.items
+    assert ctrl.tree_ctrl.items[("A", 0)][0].text() == "CH1"
+    plot = ctrl.graph_ctrl.analog_plot
+    x0, x1 = plot.vb.viewRange()[0]
+    assert x0 == pytest.approx(t[0]) and x1 == pytest.approx(t[0] + 120_000e-6)
+    # tout l'enregistrement : enveloppe, analyses suspendues
+    frame = ctrl.graph_ctrl.frame
+    assert frame.meta["envelope"] and "enveloppe" in plot.titleLabel.text
+    assert "zoomer" in ctrl.fft_ctrl.plot.titleLabel.text
+    assert "zoomer" in ctrl.math_ctrl._groups()[0].child("État").value()
+    assert frame.analog[:, 0].max() == pytest.approx(1, abs=1e-3)
+
+    # zoom sur 10 ms : données brutes, mêmes valeurs que le CSV
+    plot.setXRange(t[30_000], t[40_000], padding=0)
+    assert wait(qapp, lambda: not ctrl.graph_ctrl.frame.meta["envelope"])
+    wait(qapp, lambda: False, 0.2)
+    frame = ctrl.graph_ctrl.frame
+    i0 = int(round((frame.t0 - t[0]) / 1e-6))
+    np.testing.assert_allclose(frame.analog[:, 0], s1[i0:i0 + frame.n_samples], atol=1e-6)
+    assert scope.region.getRegion()[0] == pytest.approx(t[30_000], abs=1e-6)
+    # FFT : 1 kHz ; voie calculée ; curseurs et mesures sur les données brutes
+    assert "Spectre" == ctrl.fft_ctrl.plot.titleLabel.text
+    assert abs(_peak(ctrl.fft_ctrl) - 1000) < 120
+    y = ctrl.graph_ctrl.curves[("M", "M1")].yData        # getData() : rognées à la vue
+    np.testing.assert_allclose(y, frame.analog[:, 0] * frame.analog[:, 1], atol=1e-9)
+    ctrl.cursor_ctrl.set_type("Verticaux")
+    ctrl.cursor_ctrl.set_vertical(t[31_000], t[31_250])            # un quart de période
+    assert ctrl.cursor_ctrl.p("Verticaux", "Δt").value() == "250 µs"
+    assert ctrl.cursor_ctrl.p("Mesures").opts["visible"]
+    values = ctrl.graph_ctrl.values_at(t[31_000])
+    assert values[("A", 0)] == pytest.approx(s1[31_000], abs=1e-6)
+    window.grab().save(str(SHOTS / "logger_scope.png"))
+
+    # vue d'ensemble : déplacer la zone déplace le graphique
+    scope.region.setRegion((t[100_000], t[110_000]))
+    assert plot.vb.viewRange()[0][0] == pytest.approx(t[100_000], abs=1e-6)
+
+    # fermeture : retour à l'affichage du logger
+    window.actionCloseScope.trigger()
+    assert not scope.active and not window.overviewgraph.isVisible()
+    assert ctrl.graph_ctrl.cfg.signals == [1, 4, 6, 15]
+
+
+def _peak(fft):
+    from model import spectrum
+    j = 0
+    return spectrum.find_peaks(fft.freq, fft.amp[:, j], 1, fft.p("Fenêtre").value(),
+                               min_frequency=fft.freq[1])[0].frequency
+
+
+def test_scope_reuse_h5_and_back_to_logger(setup, tmp_path):
+    qapp, sim, window, ctrl = setup
+    path, *_ = _tek_csv(tmp_path / "dpo.csv", n=20_000)
+    _open_scope(qapp, ctrl, [path])
+    ctrl.scope_ctrl.close()
+    _open_scope(qapp, ctrl, [path])                              # .h5 plus récent : réutilisé
+    assert "réutilisée" in window.statusBar().currentMessage()
+    _open_scope(qapp, ctrl, [str(tmp_path / "dpo.h5")])           # ouverture directe du .h5
+    assert ctrl.scope_ctrl.record.names == ["CH1", "CH2"]
+    # démarrer une acquisition referme l'enregistrement
+    window.actionStart.trigger()
+    assert not ctrl.scope_ctrl.active
+    assert wait(qapp, lambda: ctrl.graph_ctrl.frame is not None
+                and ctrl.graph_ctrl.frame.signals == [1, 4, 6, 15])
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+    # trame de la mémoire tampon choisie pendant l'affichage d'un enregistrement
+    _open_scope(qapp, ctrl, [path])
+    window.framesList.setCurrentRow(0)
+    assert not ctrl.scope_ctrl.active and ctrl.graph_ctrl.cfg.signals == [1, 4, 6, 15]
+
+
+def test_scope_invalid_files(setup, tmp_path, monkeypatch):
+    qapp, sim, window, ctrl = setup
+    shown = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a: shown.append(a[2]))
+    bad = tmp_path / "bad.h5"
+    bad.write_text("pas du HDF5")
+    assert not ctrl.open_files([str(bad)])
+    assert "illisible" in shown[-1] and not ctrl.scope_ctrl.active
+    a, *_ = _tek_csv(tmp_path / "a.csv", n=5000)
+    logger_csv = tmp_path / "logger.csv"
+    logger_csv.write_text("trame,temps_s,V\n1,0,2\n")
+    assert not ctrl.open_files([a, str(logger_csv)])               # mélange refusé
+    assert "Plusieurs fichiers" in shown[-1]

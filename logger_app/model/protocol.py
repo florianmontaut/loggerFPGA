@@ -112,6 +112,8 @@ class Frame:
     sample_rate: float
     timestamp:  float = 0.0             # time.time() à la réception
     meta:       dict = field(default_factory=dict)
+    t0:         float = 0.0             # temps du premier échantillon (s) : 0 pour le logger,
+                                        # instant réel pour un enregistrement d'oscilloscope
 
     @property
     def n_samples(self) -> int:
@@ -122,7 +124,7 @@ class Frame:
         return [s for s in self.signals if s != LOGIC_SIGNAL]
 
     def time(self) -> np.ndarray:
-        return np.arange(self.n_samples) / self.sample_rate
+        return self.t0 + np.arange(self.n_samples) / self.sample_rate
 
 
 def decode_payload(payload: bytes, cfg: LoggerConfig) -> np.ndarray:

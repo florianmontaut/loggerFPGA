@@ -18,6 +18,7 @@ from __future__ import annotations
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from model.config import LoggerConfig
+from model import measures
 from ressources import pens
 
 KEY_ROLE = QtCore.Qt.ItemDataRole.UserRole + 1
@@ -54,9 +55,16 @@ class ChannelTreeController(QtCore.QObject):
         self.model.removeRows(0, self.model.rowCount())
         self.items.clear()
         fs = cfg.sample_rate
-        root = self._row(f"Logger {cfg.ip_fpga}", f"{fs / 1e3:.6g} kHz", "")
-        root[0].setToolTip(f"25 MHz / {cfg.divider} — {cfg.samples_per_channel} points "
-                           f"par voie ({cfg.frame_duration * 1e3:.4g} ms)")
+        if cfg.source_name:                     # enregistrement long d'oscilloscope
+            root = self._row(cfg.source_name, measures.si(fs, "Hz", 4), "")
+        else:
+            root = self._row(f"Logger {cfg.ip_fpga}", f"{fs / 1e3:.6g} kHz", "")
+        if cfg.source_name:
+            root[0].setToolTip(f"{cfg.samples_per_channel:,} points par voie "
+                               f"({measures.si(cfg.frame_duration, 's')})".replace(",", " "))
+        else:
+            root[0].setToolTip(f"25 MHz / {cfg.divider} — {cfg.samples_per_channel} points "
+                               f"par voie ({cfg.frame_duration * 1e3:.4g} ms)")
         self.model.appendRow(root)
         if cfg.analog_signals:
             group = self._row("Voies analogiques", "", "")

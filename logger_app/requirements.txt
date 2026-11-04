@@ -2,5 +2,7 @@
 PyQt6>=6.4.2
 pyqtgraph>=0.13.3
 numpy>=1.26
+# enregistrements longs d'oscilloscope (workspace HDF5, format du projet HDF5_viewer)
+h5py>=3.8
 # optionnel : même thème que le GLviewer
 pyqtdarktheme==2.1.0

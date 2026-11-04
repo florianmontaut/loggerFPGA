@@ -15,6 +15,7 @@ Fenêtres « périodiques » (adaptées à la FFT) définies par leurs coefficie
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -35,15 +36,51 @@ SCALES = ("crête", "efficace", "dB")
 
 
 def window(name: str, n: int) -> np.ndarray:
+    """Fenêtre (copie) : mise en cache, la largeur de zoom change peu d'un calcul à l'autre."""
+    return _window(name, int(n)).copy()
+
+
+EXACT_WINDOW_MAX = 65536
+
+
+@lru_cache(maxsize=8)
+def _window(name: str, n: int) -> np.ndarray:
     try:
         coefs = WINDOWS[name]
     except KeyError:
         raise ValueError(f"Fenêtre inconnue : {name}") from None
-    phase = 2 * np.pi * np.arange(n) / n
-    w = np.zeros(n)
-    for k, a in enumerate(coefs):
-        w += (-1) ** k * a * np.cos(k * phase)
+    w = np.full(n, coefs[0], dtype=float)          # terme constant : pas de cosinus
+    if len(coefs) > 1:
+        # grandes fenêtres (enregistrements longs) : cosinus en simple précision, bien plus
+        # rapide (erreur relative ~1e-7, sans effet visible) ; trames du logger : double
+        dtype = np.float32 if n > EXACT_WINDOW_MAX else np.float64
+        phase = np.arange(n, dtype=dtype) * dtype(2 * np.pi / n)
+        for k, a in enumerate(coefs[1:], start=1):
+            w += (-1) ** k * a * np.cos(dtype(k) * phase)
+    w.flags.writeable = False                       # partagée par le cache
     return w
+
+
+def fast_length(n: int) -> int:
+    """
+    Plus petite longueur >= n produit de 2, 3 et 5 : la FFT de numpy est très lente pour
+    une longueur à grands facteurs premiers (2,2 s pour 1 990 001 points, quelques dizaines
+    de ms en complétant à 2 000 000).
+    """
+    if n <= 6:
+        return max(n, 1)
+    best = 1 << (n - 1).bit_length()
+    p5 = 1
+    while p5 < best:
+        p35 = p5
+        while p35 < best:
+            p = p35
+            while p < n:
+                p *= 2
+            best = min(best, p)
+            p35 *= 3
+        p5 *= 5
+    return best
 
 
 def enbw_bins(name: str, n: int = 4096) -> float:
@@ -65,13 +102,21 @@ def amplitude_spectrum(y: np.ndarray, fs: float, win: str = "hann",
         raise ValueError("Il faut au moins deux points pour une FFT")
     if remove_dc:
         y = y - y.mean(axis=0)
-    w = window(win, n)
-    w_shaped = w if y.ndim == 1 else w[:, None]
-    spec = np.abs(np.fft.rfft(y * w_shaped, axis=0)) * 2 / w.sum()
+    w = _window(win, n)
+    # signal fenêtré complété par des zéros jusqu'à une longueur rapide : amplitudes
+    # inchangées (normalisation par la somme de la fenêtre), spectre interpolé
+    nfft = fast_length(n)
+    if y.ndim == 1:
+        spec = np.abs(np.fft.rfft(y * w, n=nfft))
+    else:
+        # voie par voie, données contiguës : 5 fois plus rapide que rfft(axis=0)
+        spec = np.column_stack([np.abs(np.fft.rfft(np.ascontiguousarray(y[:, j]) * w, n=nfft))
+                                for j in range(y.shape[1])])
+    spec *= 2 / w.sum()
     spec[0] /= 2                          # composante continue : pas de raie symétrique
-    if n % 2 == 0:
+    if nfft % 2 == 0:
         spec[-1] /= 2                     # raie de Nyquist
-    return np.fft.rfftfreq(n, 1 / fs), spec
+    return np.fft.rfftfreq(nfft, 1 / fs), spec
 
 
 def scale_amplitude(amp: np.ndarray, scale: str, floor_db: float = -200.0) -> np.ndarray:

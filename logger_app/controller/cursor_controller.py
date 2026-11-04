@@ -130,13 +130,13 @@ class CursorController(QtCore.QObject):
     def configure(self, cfg: LoggerConfig):
         """Nouvelle configuration : bornes des curseurs, voie de mesure, panneaux."""
         self.cfg = cfg
-        span = cfg.frame_duration
+        span, t0 = cfg.frame_duration, cfg.time_origin
         for lines in self.v_lines.values():
             for line in lines:
-                line.setBounds((0, span))
+                line.setBounds((t0, t0 + span))
         t1, t2 = self.p("Verticaux", "t1").value(), self.p("Verticaux", "t2").value()
-        if not (0 <= t1 <= span and 0 <= t2 <= span) or t1 == t2:
-            self.set_vertical(0.25 * span, 0.75 * span)
+        if not (t0 <= t1 <= t0 + span and t0 <= t2 <= t0 + span) or t1 == t2:
+            self.set_vertical(t0 + 0.25 * span, t0 + 0.75 * span)
         choices = {f"{s:2d}  {cfg.analog_name(s)}": s for s in cfg.analog_signals} or {NONE: None}
         selector = self.p("Voie de mesure")
         current = selector.value()
@@ -257,6 +257,9 @@ class CursorController(QtCore.QObject):
             if self.horizontal:
                 lines.append(f"Δy (curseurs) = {measures.si(y2 - y1, unit)}")
             seg = self._segment(t1, t2)
+            frame = self.graph.frame
+            if self.vertical and frame is not None and frame.meta.get("envelope"):
+                lines.append("Mesures : zoomer jusqu'aux données brutes")
             self.p("Mesures").setOpts(visible=self.vertical and seg is not None)
             if seg is not None:
                 values = {
@@ -280,10 +283,10 @@ class CursorController(QtCore.QObject):
     def _segment(self, t1, t2) -> measures.SegmentMeasures | None:
         frame = self.graph.frame
         sig = self._signal()
-        if frame is None or sig not in frame.analog_signals:
-            return None
+        if frame is None or sig not in frame.analog_signals or frame.meta.get("envelope"):
+            return None           # enveloppe min/max : pas de mesure sur des données brutes
         j = frame.analog_signals.index(sig)
-        return measures.segment(frame.analog[:, j], frame.sample_rate, t1, t2)
+        return measures.segment(frame.analog[:, j], frame.sample_rate, t1, t2, frame.t0)
 
     def _emit_channel_values(self, t1, t2):
         if not self.vertical:
@@ -294,13 +297,14 @@ class CursorController(QtCore.QObject):
             self.channel_values.emit({}, {})
             return
         values = self.graph.values_at(t1)
-        d = measures.deltas(frame.analog, frame.sample_rate, t1, t2)
+        d = measures.deltas(frame.analog, frame.sample_rate, t1, t2, frame.t0)
         dys = {("A", s): float(v) for s, v in zip(frame.analog_signals, d)}
         if frame.logic is not None:
-            dl = measures.deltas(frame.logic, frame.sample_rate, t1, t2)
+            dl = measures.deltas(frame.logic, frame.sample_rate, t1, t2, frame.t0)
             dys.update({("L", b): int(v) for b, v in enumerate(dl)})
         math = self.graph.math_results(frame)
         if math:
-            dm = measures.deltas(np.column_stack(list(math.values())), frame.sample_rate, t1, t2)
+            dm = measures.deltas(np.column_stack(list(math.values())), frame.sample_rate,
+                                 t1, t2, frame.t0)
             dys.update({("M", name): float(v) for name, v in zip(math, dm)})
         self.channel_values.emit(values, dys)

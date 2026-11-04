@@ -87,10 +87,15 @@ class MainWindow(QtWidgets.QMainWindow):
                                              "fichier (Ctrl+Maj+S)", "Ctrl+Shift+S",
                                              icon=sp.SP_DialogSaveButton)
         self.actionOpenRecording = self._action("Ouvrir un enregistrement...",
-                                                "Recharger les trames d'un enregistrement du "
-                                                "logger (.csv, .npz) dans la mémoire tampon "
+                                                "Recharger un enregistrement du logger (.csv, "
+                                                ".npz) ou ouvrir un enregistrement long "
+                                                "d'oscilloscope (.csv Tektronix, .h5) "
                                                 "(Ctrl+Maj+O)", "Ctrl+Shift+O",
                                                 icon=sp.SP_DialogOpenButton)
+        self.actionCloseScope = self._action("Fermer l'enregistrement d'oscilloscope",
+                                             "Revenir à l'affichage du logger",
+                                             icon=sp.SP_DialogCloseButton)
+        self.actionCloseScope.setEnabled(False)
         self.actionAutoRange = self._action("Échelle auto", "Adapter l'échelle à chaque trame",
                                             checkable=True, icon=sp.SP_BrowserReload)
         self.actionAutoRange.setChecked(True)
@@ -112,7 +117,7 @@ class MainWindow(QtWidgets.QMainWindow):
         menu = self.menuBar().addMenu("Fichier")
         menu.addActions([self.actionLoadConfig, self.actionSaveConfig])
         menu.addSeparator()
-        menu.addActions([self.actionOpenRecording, self.actionSaveBuffer])
+        menu.addActions([self.actionOpenRecording, self.actionCloseScope, self.actionSaveBuffer])
         menu.addSeparator()
         menu.addAction(self.actionQuit)
         menu = self.menuBar().addMenu("Acquisition")
@@ -179,7 +184,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.graph_splitter.addWidget(widget)
         self.graph_splitter.setChildrenCollapsible(False)
         self.splitter.addWidget(self.left_splitter)
-        self.splitter.addWidget(self.graph_splitter)
+        # enregistrement long d'oscilloscope : vue d'ensemble au-dessus des graphiques
+        # (hors du séparateur des graphiques déportables)
+        self.overviewgraph = pg.GraphicsLayoutWidget()
+        self.overviewgraph.setFixedHeight(130)
+        self.overviewgraph.hide()
+        graphs = QtWidgets.QWidget()
+        column = QtWidgets.QVBoxLayout(graphs)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(2)
+        column.addWidget(self.overviewgraph)
+        column.addWidget(self.graph_splitter)
+        self.splitter.addWidget(graphs)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 4)
         self.splitter.setCollapsible(0, False)
