@@ -72,8 +72,11 @@ class AcquisitionWorker(QtCore.QThread):
             return
         self._record_state = request
         enabled, record_dir, prefix, fmt = request
-        directory = self._recorder.directory if self._recorder else record_dir
+        was_recording = self._recorder is not None
+        directory = self._recorder.path if was_recording else record_dir
         self._close_recorder()
+        if not enabled and not was_recording:
+            return                      # rien à arrêter : pas de message « arrêté »
         if enabled:
             cfg = self.cfg.copy()
             cfg.record_dir, cfg.record_prefix, cfg.record_format = record_dir, prefix, fmt

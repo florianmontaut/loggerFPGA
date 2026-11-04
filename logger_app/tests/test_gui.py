@@ -216,8 +216,8 @@ def test_detach_fft_window(setup):
     qapp, sim, window, ctrl = setup
     det = ctrl.detach_ctrl
     split = window.graph_splitter
-    assert [split.widget(i) for i in range(3)] == [window.analoggraph, window.logicgraph,
-                                                   window.fftgraph]
+    assert [split.widget(i) for i in range(4)] == [window.analoggraph, window.mathgraph,
+                                                   window.logicgraph, window.fftgraph]
     window.actionFFT.setChecked(True)
     det.detach("fft")
     fft_window = det.window_of("fft")
@@ -249,8 +249,8 @@ def test_detach_fft_window(setup):
     fft_window.close()
     qapp.processEvents()
     assert not det.is_detached("fft")
-    assert split.indexOf(window.fftgraph) == 2 and window.fftgraph.isVisible()
-    assert not window.menuWindows.actions()[2].isChecked()
+    assert split.indexOf(window.fftgraph) == 3 and window.fftgraph.isVisible()
+    assert not window.menuWindows.actions()[3].isChecked()
 
 
 def test_detach_all_and_restore(setup, tmp_path):
@@ -297,11 +297,16 @@ def test_record_button_during_acquisition(setup, tmp_path, monkeypatch):
     qapp, sim, window, ctrl = setup
     ctrl.config_ctrl.p("Enregistrement", "Dossier").setValue(str(tmp_path))
     csvs = lambda: sorted(p for p in tmp_path.iterdir() if p.suffix == ".csv")
-    trames = lambda path: set(np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)[:, 0])
+    def trames(path):
+        lines = path.read_text().splitlines()[1:]       # en-tête seul : pas encore de trame
+        return {int(line.split(",", 1)[0]) for line in lines if line}
     assert window.actionRecord.isEnabled()
+    messages = []
+    ctrl.acq_ctrl.recording_changed.connect(lambda on, path: messages.append((on, path)))
     window.actionStart.trigger()
     assert wait(qapp, lambda: ctrl.graph_ctrl.frame is not None)
     assert csvs() == []
+    assert messages == []           # pas d'« enregistrement arrêté » sans enregistrement
     # clic sur Enregistrer pendant l'acquisition : un fichier, qui grandit trame après trame
     assert window.actionRecord.isEnabled()
     window.actionRecord.trigger()
@@ -473,3 +478,143 @@ def test_new_channel_layout_asks_before_clearing_buffer(setup, monkeypatch):
     assert wait(qapp, lambda: len(buf.buffer) >= 1 and buf.buffer.cfg.signals == [1, 7, 6, 15])
     window.actionStop.trigger()
     assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+
+
+def test_fft_frequency_axis_log_or_linear(setup, tmp_path):
+    """Axe des fréquences : arbre, menu contextuel et Log X de pyqtgraph synchronisés."""
+    from controller.fft_controller import FFTController, SETTINGS_KEY
+    from model.protocol import encode_payload, make_frame
+    qapp, sim, window, ctrl = setup
+    fft = ctrl.fft_ctrl
+    ctrl.config_ctrl.p("Échantillonnage", "Diviseur").setValue(500)          # 50 kHz
+    cfg = ctrl.config_ctrl.to_config()
+    window.actionFFT.setChecked(True)
+    n = cfg.samples_per_channel
+    t = np.arange(n) / cfg.sample_rate
+    raw = np.zeros((n, 4), dtype=np.int16)
+    raw[:, 0] = 8000 * np.sin(2 * np.pi * 100 * t) + 2000 * np.sin(2 * np.pi * 3000 * t)
+    ctrl.fft_ctrl.show_frame(make_frame(encode_payload(raw), cfg, 1))
+    wait(qapp, lambda: False, 0.1)
+    peaks_lin = fft.peak_markers.getData()[0].copy()
+    assert abs(peaks_lin[0] - 100) < 1
+
+    # arbre des paramètres
+    fft.p("Axe des fréquences").setValue("Logarithmique")
+    wait(qapp, lambda: False, 0.1)
+    assert fft.log_x and fft.log_action.isChecked() and fft.plot.ctrl.logXCheck.isChecked()
+    assert fft.curves[1].opts["logMode"][0]
+    lo, hi = fft.plot.vb.viewRange()[0]
+    df = cfg.sample_rate / n
+    assert lo == pytest.approx(np.log10(df), abs=0.01)
+    assert hi == pytest.approx(np.log10(cfg.sample_rate / 2), abs=0.01)
+    np.testing.assert_allclose(fft.peak_markers.getData()[0], np.log10(peaks_lin), rtol=1e-6)
+    axis = fft.plot.getAxis("bottom")
+    assert axis.tickStrings([2.0, 3.0], 1, 1.0) == ["100 Hz", "1 kHz"]
+    assert "log" in axis.labelText
+    window.fftgraph.grab().save(str(SHOTS / "logger_fft_log.png"))
+
+    # menu contextuel du spectre
+    fft.log_action.trigger()
+    assert not fft.log_x and fft.p("Axe des fréquences").value() == "Linéaire"
+    assert not fft.curves[1].opts["logMode"][0]
+    assert fft.plot.vb.viewRange()[0][1] == pytest.approx(cfg.sample_rate / 2)
+    # case Log X de pyqtgraph (Plot Options > Transforms)
+    fft.plot.ctrl.logXCheck.setChecked(True)
+    assert fft.log_x and fft.log_action.isChecked()
+    assert fft.plot.vb.viewRange()[0][1] == pytest.approx(np.log10(cfg.sample_rate / 2), abs=0.01)
+    assert not fft.plot.ctrl.logYCheck.isEnabled()
+
+    # nouvelle acquisition (reconfiguration) : la plage reste en échelle log
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: fft.amp is not None and ctrl.acq_ctrl.running)
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+    assert fft.plot.vb.viewRange()[0][1] < 10                       # log10(Hz), pas des Hz
+
+    # choix mémorisé d'une session à l'autre
+    settings = QtCore.QSettings(str(tmp_path / "s.ini"), QtCore.QSettings.Format.IniFormat)
+    settings.setValue(SETTINGS_KEY, "Logarithmique")
+    from pyqtgraph.parametertree import ParameterTree
+    import pyqtgraph as pg
+    other = FFTController(pg.GraphicsLayoutWidget(), ParameterTree(), settings)
+    assert other.log_x and other.plot.ctrl.logXCheck.isChecked()
+    other.set_log_x(False)
+    assert settings.value(SETTINGS_KEY) == "Linéaire"
+
+
+def test_math_channels_live(setup):
+    """Voies calculées : panneau, arborescence, curseurs, erreurs, configuration."""
+    qapp, sim, window, ctrl = setup
+    math = ctrl.math_ctrl
+    assert not window.mathgraph.isVisible()                # aucune voie calculée
+    math.add()
+    group = math._groups()[0]
+    assert group.child("Formule").value() == "[I_HV]"      # première voie proposée
+    group.child("Nom").setValue("P")
+    group.child("Formule").setValue("[I_HV]*[V_PH1_INV2]")
+    assert group.child("État").value() == "✓ V²"
+    assert window.mathgraph.isVisible()
+    assert "[V_PH1_INV1_RMS]" in math.params.child("Voies et fonctions").value()
+
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: ctrl.graph_ctrl.frame is not None)
+    wait(qapp, lambda: False, 0.2)
+    window.actionPause.setChecked(True)                    # trame figée pour comparer
+    wait(qapp, lambda: False, 0.1)
+    frame = ctrl.graph_ctrl.frame
+    x, y = ctrl.graph_ctrl.curves[("M", "P")].getData()
+    np.testing.assert_allclose(y, frame.analog[:, 0] * frame.analog[:, 1])
+    # arborescence : groupe Voies calculées, valeur sous le curseur
+    assert ("M", "P") in ctrl.tree_ctrl.items
+    assert ctrl.tree_ctrl.items[("M", "P")][1].text() != ""
+    # curseurs verticaux : Δ de la voie calculée
+    ctrl.cursor_ctrl.set_type("Verticaux")
+    assert ctrl.cursor_ctrl.v_lines["math"][0] in ctrl.graph_ctrl.math_plot.items
+    i1, i2 = 100, 900
+    ctrl.cursor_ctrl.set_vertical(i1 / frame.sample_rate, i2 / frame.sample_rate)
+    expected = y[i2] - y[i1]
+    assert float(ctrl.tree_ctrl.items[("M", "P")][3].text()) == pytest.approx(expected, rel=1e-4)
+
+    # deuxième voie : réutilise la première, modifiée en direct
+    math.add()
+    second = math._groups()[1]
+    name = second.child("Nom").value()
+    assert name == "M1"                                    # premier nom libre
+    second.child("Formule").setValue("rms([P])")
+    wait(qapp, lambda: False, 0.1)
+    assert ctrl.graph_ctrl.curves[("M", name)].getData()[1][0] == pytest.approx(
+        np.sqrt(np.mean(y ** 2)), rel=1e-6)
+    # formule invalide : signalée, non tracée
+    second.child("Formule").setValue("[P]*")
+    assert second.child("État").value().startswith("⚠") and ("M", name) not in ctrl.graph_ctrl.curves
+    # erreur de calcul sur la trame
+    second.child("Formule").setValue("1/0")
+    wait(qapp, lambda: False, 0.1)
+    ctrl.graph_ctrl.show_frame(frame)
+    wait(qapp, lambda: False, 0.1)
+    assert "Division by zero" in second.child("État").value()
+    window.grab().save(str(SHOTS / "logger_math.png"))
+    window.actionPause.setChecked(False)
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+
+    # gardées dans la configuration (enregistrée en JSON, relue au démarrage)
+    saved = ctrl.config_ctrl.read_tree().math_channels
+    assert saved[0] == {"name": "P", "formula": "[I_HV]*[V_PH1_INV2]", "unit": "",
+                        "enabled": True}
+    math.remove(math._groups()[0])
+    assert ("M", "P") not in ctrl.graph_ctrl.curves
+    math.remove(math._groups()[0])
+    assert not window.mathgraph.isVisible()
+
+
+def test_math_channels_loaded_with_config(setup, tmp_path):
+    qapp, sim, window, ctrl = setup
+    cfg = ctrl.config_ctrl.read_tree()
+    cfg.math_channels = [{"name": "Somme", "formula": "A1+A4", "unit": "V", "enabled": True}]
+    path = tmp_path / "cfg.json"
+    cfg.save(str(path))
+    ctrl.load_config(str(path))
+    group = ctrl.math_ctrl._groups()[0]
+    assert group.child("Formule").value() == "A1+A4" and group.child("État").value() == "✓ V"
+    assert ("M", "Somme") in ctrl.graph_ctrl.curves and window.mathgraph.isVisible()

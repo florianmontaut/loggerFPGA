@@ -18,6 +18,7 @@ l'affichage (bouton Figer).
 """
 from __future__ import annotations
 
+import numpy as np
 import pyqtgraph as pg
 import pyqtgraph.parametertree as ptree
 from PyQt6 import QtCore
@@ -74,6 +75,7 @@ class CursorController(QtCore.QObject):
         self.v_lines = {
             "analog": [self._line(90, V_PEN, label) for label in ("t1", "t2")],
             "logic": [self._line(90, V_PEN, None) for _ in range(2)],
+            "math": [self._line(90, V_PEN, None) for _ in range(2)],
         }
         self.h_lines = [self._line(0, H_PEN, label) for label in ("y1", "y2")]
         for panel, lines in self.v_lines.items():
@@ -165,7 +167,8 @@ class CursorController(QtCore.QObject):
         """Affiche / masque les lignes et les place aux valeurs des champs."""
         self._syncing = True
         try:
-            plots = {"analog": self.graph.analog_plot, "logic": self.graph.logic_plot}
+            plots = {"analog": self.graph.analog_plot, "logic": self.graph.logic_plot,
+                     "math": self.graph.math_plot}
             t = (self.p("Verticaux", "t1").value(), self.p("Verticaux", "t2").value())
             for panel, lines in self.v_lines.items():
                 for line, value in zip(lines, t):
@@ -296,4 +299,8 @@ class CursorController(QtCore.QObject):
         if frame.logic is not None:
             dl = measures.deltas(frame.logic, frame.sample_rate, t1, t2)
             dys.update({("L", b): int(v) for b, v in enumerate(dl)})
+        math = self.graph.math_results(frame)
+        if math:
+            dm = measures.deltas(np.column_stack(list(math.values())), frame.sample_rate, t1, t2)
+            dys.update({("M", name): float(v) for name, v in zip(math, dm)})
         self.channel_values.emit(values, dys)
