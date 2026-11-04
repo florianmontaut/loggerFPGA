@@ -81,6 +81,7 @@ logger_app/
 │   ├── frame_buffer.py            mémoire tampon des dernières trames
 │   ├── formula/                   moteur de formules du GLviewer (copie, voir son __init__)
 │   ├── math_channels.py           voies calculées : fonctions temps réel, unités, évaluation
+│   ├── loader.py                  relecture d'un enregistrement (.csv, .npz)
 │   ├── spectrum.py                FFT : fenêtres, amplitudes calibrées, moyennage, pics, THD
 │   └── measures.py                mesures entre deux curseurs (Δt, Δy, min, max, moyenne, efficace)
 ├── controller/
@@ -223,6 +224,35 @@ trame,temps_s,I_HV (V),V_PH1_INV2 (V),K_HV,K_PRE,L2,...
 
 Les trames enregistrées par ce bouton sont marquées ✓ dans la mémoire tampon : elles ne
 sont pas proposées à nouveau avant de quitter.
+
+### Relire un enregistrement
+
+*Fichier › Ouvrir un enregistrement...* (Ctrl+Maj+O, ou bouton de l'onglet Trames)
+recharge les trames d'un fichier écrit par le logger dans la mémoire tampon. Elles se
+relisent alors comme des trames capturées : vignettes, navigation Alt+←/→, graphiques,
+FFT, curseurs, voies calculées. Le titre du graphique et l'onglet Trames indiquent le
+fichier d'origine.
+
+* **Formats** : CSV avec colonne `trame` (format actuel), npz, et CSV de l'ancien format
+  (un fichier par trame, colonne `time_s`).
+* **Configuration** : voies, noms, gains, unités et diviseur sont lus dans le `.json`
+  écrit à côté du fichier. Sans lui, ils sont reconstitués depuis l'en-tête du CSV : les
+  voies sont alors renumérotées 0, 1, 2… et l'heure de capture est inconnue.
+* **Affichage** : graphiques et arborescence prennent la configuration du fichier.
+  L'arbre des paramètres garde celle de l'acquisition, qui n'est pas modifiée par
+  l'ouverture d'un fichier.
+* **Mémoire tampon** : le fichier la remplace. Si elle contient des trames non
+  enregistrées, l'application propose de les enregistrer d'abord (question posée
+  seulement si le fichier est lisible). Elle est agrandie si le fichier contient plus de
+  trames que *Trames gardées* (5 000 au plus).
+* **Trames relues** : elles sont marquées ✓ (déjà sur disque) et ne sont pas proposées
+  à l'enregistrement en quittant. L'acquisition suivante numérote ses trames après
+  celles du fichier.
+* **Pendant une acquisition**, l'ouverture est refusée : il faut d'abord l'arrêter (F7).
+
+Lecture : environ 0,5 s pour 64 trames (21 Mo de CSV).
+
+![relecture d'un enregistrement](docs/capture_relecture.png)
 
 ### Voies calculées (MATH)
 
@@ -398,7 +428,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-165 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, acquisition complète contre le
+177 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes

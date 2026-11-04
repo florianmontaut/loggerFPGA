@@ -30,6 +30,8 @@ from controller.fft_controller import FFTController
 from controller.graph_controller import LiveGraphController
 from controller.math_controller import MathController
 from model.config import ConfigError, LoggerConfig
+from model.frame_buffer import MAX_CAPACITY
+from model.loader import RecordingError, load_recording
 from model.math_channels import definitions_from_config
 from view.main_window import MainWindow
 
@@ -136,6 +138,7 @@ class MainController(QtCore.QObject):
         v.actionNextFrame.triggered.connect(lambda: self.buffer_ctrl.next())
         v.actionLiveFrame.triggered.connect(lambda: self.buffer_ctrl.go_live())
         v.actionSaveBuffer.triggered.connect(lambda: self.buffer_ctrl.save_dialog())
+        v.actionOpenRecording.triggered.connect(self.open_recording_dialog)
         self.acq_ctrl.status.connect(v.show_message)
         self.acq_ctrl.error.connect(lambda msg: v.show_message(f"⚠ {msg}", 8000))
         self.acq_ctrl.state_changed.connect(
@@ -198,8 +201,63 @@ class MainController(QtCore.QObject):
             # configuration modifiée depuis : affichage remis à celle de la trame
             self._apply_preview(buffer_cfg, force=True)
         suffix = "  —  mémoire tampon" if mode == "review" else ""
+        if frame.meta.get("loaded"):
+            suffix = f"  —  {os.path.basename(frame.meta['loaded'])}"
         self.graph_ctrl.show_frame(frame, suffix)
         self.fft_ctrl.show_frame(frame)
+
+    # ------------------------------------------------------------------ relecture d'un fichier
+    def open_recording_dialog(self):
+        if self.acq_ctrl.running:
+            QtWidgets.QMessageBox.information(
+                self.view, "Ouvrir un enregistrement",
+                "Arrêtez l'acquisition (F7) avant d'ouvrir un enregistrement.")
+            return
+        directory = self._record_settings()[0]
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self.view, "Ouvrir un enregistrement", directory,
+            "Enregistrements du logger (*.csv *.npz);;Tous les fichiers (*)")
+        if path:
+            self.open_recording(path)
+
+    def open_recording(self, path: str) -> bool:
+        """Trames d'un enregistrement chargées dans la mémoire tampon, en relecture."""
+        if self.acq_ctrl.running:
+            return False
+        # fichier lu d'abord : on ne propose d'abandonner la mémoire tampon que si le
+        # fichier est valide
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            recording = load_recording(path)
+        except RecordingError as exc:
+            QtWidgets.QMessageBox.warning(self.view, "Enregistrement illisible", str(exc))
+            return False
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if not self.buffer_ctrl.confirm_unsaved("ouvrir un enregistrement (la mémoire "
+                                                "tampon sera remplacée)"):
+            return False
+        frames = recording.frames
+        notes = list(recording.notes)
+        if len(frames) > MAX_CAPACITY:
+            notes.append(f"{len(frames)} trames : seules les {MAX_CAPACITY} dernières sont "
+                         f"chargées (taille maximale de la mémoire tampon)")
+            frames = frames[-MAX_CAPACITY:]
+        if len(frames) > self.buffer_ctrl.buffer.capacity:
+            # mémoire tampon agrandie pour contenir tout le fichier
+            self.buffer_ctrl.set_capacity(len(frames))
+            self.config_ctrl.p("Mémoire tampon", "Trames gardées").setValue(len(frames))
+            notes.append(f"mémoire tampon portée à {len(frames)} trames")
+        self.buffer_ctrl.load(frames, recording.cfg)
+        # numéros des prochaines trames acquises : après ceux du fichier
+        self.acq_ctrl.next_index = max(self.acq_ctrl.next_index,
+                                       max(f.index for f in frames) + 1)
+        self.view.tree_tabs.setCurrentIndex(1)              # onglet Trames
+        message = f"{len(frames)} trame(s) relue(s) depuis {os.path.basename(path)}"
+        if notes:
+            message += " — " + " ; ".join(notes)
+        self.view.show_message(message, 12000)
+        return True
 
     def _on_math_changed(self):
         """Voies calculées modifiées : courbes, arborescence et curseurs mis à jour."""

@@ -618,3 +618,101 @@ def test_math_channels_loaded_with_config(setup, tmp_path):
     group = ctrl.math_ctrl._groups()[0]
     assert group.child("Formule").value() == "A1+A4" and group.child("État").value() == "✓ V"
     assert ("M", "Somme") in ctrl.graph_ctrl.curves and window.mathgraph.isVisible()
+
+
+def _recording(tmp_path, signals, indexes, name="enr.csv"):
+    from model.protocol import encode_payload, make_frame
+    from model.recorder import save_frames
+    cfg = LoggerConfig(signals=signals, units=["V"] * 15)
+    n = cfg.samples_per_channel
+    rng = np.random.default_rng(3)
+    frames = [make_frame(encode_payload(rng.integers(-9000, 9000, (n, len(signals)))
+                                        .astype(np.int16)), cfg, i, 1_700_000_000.0 + i)
+              for i in indexes]
+    return save_frames(frames, cfg, str(tmp_path / name)), frames
+
+
+def test_open_recording(setup, tmp_path, monkeypatch):
+    qapp, sim, window, ctrl = setup
+    buf = ctrl.buffer_ctrl
+    path, original = _recording(tmp_path, [1, 4, 6, 15], [21, 22, 23])
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
+                        lambda *a, **k: (path, ""))
+    window.actionOpenRecording.trigger()
+    assert [f.index for f in buf.buffer] == [21, 22, 23]
+    assert window.framesList.count() == 3 and window.tree_tabs.currentIndex() == 1
+    assert buf.reviewing is buf.buffer[0]
+    wait(qapp, lambda: False, 0.1)
+    np.testing.assert_allclose(ctrl.graph_ctrl.frame.analog, original[0].analog)
+    assert "enr.csv" in ctrl.graph_ctrl.analog_plot.titleLabel.text
+    assert "Fichier : enr.csv" in window.bufferLabel.text()
+    assert buf.buffer.unsaved() == []                       # déjà sur disque
+    assert "3 trame(s) relue(s)" in window.statusBar().currentMessage()
+    # navigation et voies calculées sur les trames relues
+    window.actionNextFrame.trigger()
+    assert buf.reviewing.index == 22
+    ctrl.math_ctrl.add()
+    ctrl.math_ctrl._groups()[0].child("Formule").setValue("[I_HV]*2")
+    wait(qapp, lambda: False, 0.1)
+    np.testing.assert_allclose(ctrl.graph_ctrl.curves[("M", "M1")].getData()[1],
+                               original[1].analog[:, 0] * 2)
+    window.grab().save(str(SHOTS / "logger_open_recording.png"))
+    # l'acquisition suivante numérote après les trames du fichier
+    assert ctrl.acq_ctrl.next_index == 24
+
+
+def test_open_recording_other_layout_and_capacity(setup, tmp_path):
+    qapp, sim, window, ctrl = setup
+    buf = ctrl.buffer_ctrl
+    ctrl.config_ctrl.p("Mémoire tampon", "Trames gardées").setValue(4)
+    path, _ = _recording(tmp_path, [2, 15], range(1, 11))
+    assert ctrl.open_recording(path)
+    assert len(buf.buffer) == 10                            # mémoire tampon agrandie
+    assert ctrl.config_ctrl.p("Mémoire tampon", "Trames gardées").value() == 10
+    assert ctrl.graph_ctrl.cfg.signals == [2, 15]           # affichage à la config du fichier
+    assert ("A", 2) in ctrl.tree_ctrl.items and ("A", 1) not in ctrl.tree_ctrl.items
+    # nouvelle acquisition (autre disposition) : trames du fichier déjà enregistrées,
+    # la mémoire tampon est vidée sans question
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: len(buf.buffer) >= 1 and buf.buffer.cfg.signals == [1, 4, 6, 15])
+    assert buf.buffer[0].index == 11
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+
+
+def test_open_recording_guards(setup, tmp_path, monkeypatch):
+    qapp, sim, window, ctrl = setup
+    buf = ctrl.buffer_ctrl
+    shown = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a: shown.append(a[2]))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *a: shown.append(a[2]))
+    path, _ = _recording(tmp_path, [1, 4, 6, 15], [1, 2])
+    # pendant l'acquisition : refusé
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: len(buf.buffer) >= 2)
+    window.actionOpenRecording.trigger()
+    assert "Arrêtez l'acquisition" in shown[-1]
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+    # trames non enregistrées : Annuler -> rien n'est chargé
+    monkeypatch.setattr(buf, "_ask", lambda text: "cancel")
+    before = [f.index for f in buf.buffer]
+    assert not ctrl.open_recording(path)
+    assert [f.index for f in buf.buffer] == before
+    # fichier invalide : message, sans question sur la mémoire tampon, qui reste intacte
+    asked = []
+    monkeypatch.setattr(buf, "_ask", lambda text: asked.append(text) or "discard")
+    bad = tmp_path / "autre.csv"
+    bad.write_text("a,b\n1,2\n")
+    assert not ctrl.open_recording(str(bad))
+    assert "pas un enregistrement" in shown[-1] and asked == []
+    assert [f.index for f in buf.buffer] == before
+
+
+def test_longer_frame_not_clipped_to_previous_duration(setup):
+    """Diviseur 20 -> 500 : l'axe des temps couvre toute la nouvelle trame."""
+    qapp, sim, window, ctrl = setup
+    plot = ctrl.graph_ctrl.analog_plot
+    assert plot.vb.viewRange()[0][1] == pytest.approx(4096 / 1.25e6)
+    ctrl.config_ctrl.p("Échantillonnage", "Diviseur").setValue(500)
+    assert plot.vb.viewRange()[0][1] == pytest.approx(4096 / 50e3)

@@ -126,8 +126,9 @@ class LiveGraphController(QtCore.QObject):
             self.logic_plot.setYRange(-0.5, 16, padding=0)
             if not cfg.analog_signals:
                 span = cfg.frame_duration
-                self.logic_plot.setXRange(0, span, padding=0)
+                # limites d'abord : sinon la nouvelle plage est rognée par les anciennes
                 self.logic_plot.setLimits(xMin=-0.05 * span, xMax=1.05 * span)
+                self.logic_plot.setXRange(0, span, padding=0)
 
         if self.threshold_line in self.analog_plot.items:
             self.analog_plot.removeItem(self.threshold_line)
@@ -139,8 +140,10 @@ class LiveGraphController(QtCore.QObject):
             self.analog_plot.addItem(self.threshold_line, ignoreBounds=True)
 
         span = cfg.frame_duration
-        self.analog_plot.setXRange(0, span, padding=0)
+        # limites d'abord : sinon une trame plus longue que la précédente reste rognée
+        # à l'ancienne durée
         self.analog_plot.setLimits(xMin=-0.05 * span, xMax=1.05 * span)
+        self.analog_plot.setXRange(0, span, padding=0)
         self._apply_y_range()
         self.analog_plot.setTitle("En attente de données")
 

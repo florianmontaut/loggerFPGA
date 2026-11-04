@@ -86,6 +86,11 @@ class MainWindow(QtWidgets.QMainWindow):
                                              "Enregistrer les trames gardées en mémoire dans un "
                                              "fichier (Ctrl+Maj+S)", "Ctrl+Shift+S",
                                              icon=sp.SP_DialogSaveButton)
+        self.actionOpenRecording = self._action("Ouvrir un enregistrement...",
+                                                "Recharger les trames d'un enregistrement du "
+                                                "logger (.csv, .npz) dans la mémoire tampon "
+                                                "(Ctrl+Maj+O)", "Ctrl+Shift+O",
+                                                icon=sp.SP_DialogOpenButton)
         self.actionAutoRange = self._action("Échelle auto", "Adapter l'échelle à chaque trame",
                                             checkable=True, icon=sp.SP_BrowserReload)
         self.actionAutoRange.setChecked(True)
@@ -107,7 +112,7 @@ class MainWindow(QtWidgets.QMainWindow):
         menu = self.menuBar().addMenu("Fichier")
         menu.addActions([self.actionLoadConfig, self.actionSaveConfig])
         menu.addSeparator()
-        menu.addAction(self.actionSaveBuffer)
+        menu.addActions([self.actionOpenRecording, self.actionSaveBuffer])
         menu.addSeparator()
         menu.addAction(self.actionQuit)
         menu = self.menuBar().addMenu("Acquisition")
@@ -192,7 +197,7 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.setIconSize(QtCore.QSize(16, 16))
         bar.addActions([self.actionPrevFrame, self.actionNextFrame, self.actionLiveFrame])
         bar.addSeparator()
-        bar.addAction(self.actionSaveBuffer)
+        bar.addActions([self.actionOpenRecording, self.actionSaveBuffer])
         layout.addWidget(bar)
         self.framesList = QtWidgets.QListWidget()
         self.framesList.setIconSize(QtCore.QSize(120, 34))
