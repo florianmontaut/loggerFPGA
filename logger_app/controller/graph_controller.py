@@ -30,8 +30,9 @@ class LiveGraphController(QtCore.QObject):
     cursor_values = QtCore.pyqtSignal(dict)    # clé -> valeur sous le curseur
     fps_changed = QtCore.pyqtSignal(float)
     redrawn = QtCore.pyqtSignal()              # nouvelle trame dessinée (mesures à refaire)
-    # panneau utile ou non pour la configuration : "analog" / "logic", bool
+    # panneau utile ou non pour la configuration : "analog" / "logic" / "math", bool
     availability_changed = QtCore.pyqtSignal(str, bool)
+    math_errors = QtCore.pyqtSignal(dict)      # voies calculées en erreur sur la trame
 
     REFRESH_HZ = 30
     LOGIC_HEIGHT = 0.8
@@ -39,11 +40,14 @@ class LiveGraphController(QtCore.QObject):
     AXIS_WIDTH = 72        # axes de gauche de même largeur : échelles des temps alignées
 
     def __init__(self, analog_widget: pg.GraphicsLayoutWidget,
-                 logic_widget: pg.GraphicsLayoutWidget):
+                 logic_widget: pg.GraphicsLayoutWidget,
+                 math_widget: pg.GraphicsLayoutWidget | None = None):
         super().__init__()
         # un widget par panneau : chacun peut être déporté dans sa propre fenêtre
         self.analog_widget = analog_widget
         self.logic_widget = logic_widget
+        self.math_widget = math_widget or pg.GraphicsLayoutWidget()
+        self.math_engine = None          # model.math_channels.MathEngine (voies calculées)
         self.cfg: LoggerConfig | None = None
         self.frame: Frame | None = None
         self._dirty = False
@@ -56,7 +60,8 @@ class LiveGraphController(QtCore.QObject):
 
         self.analog_plot = pg.PlotItem()
         self.logic_plot = pg.PlotItem()
-        for plot in (self.analog_plot, self.logic_plot):
+        self.math_plot = pg.PlotItem()          # voies calculées, axe des temps commun
+        for plot in (self.analog_plot, self.logic_plot, self.math_plot):
             plot.showGrid(x=True, y=True, alpha=0.3)
             plot.setDownsampling(auto=True, mode="peak")
             plot.setClipToView(True)
@@ -64,7 +69,11 @@ class LiveGraphController(QtCore.QObject):
             plot.getAxis("left").setWidth(self.AXIS_WIDTH)
         self.analog_widget.addItem(self.analog_plot, row=0, col=0)
         self.logic_widget.addItem(self.logic_plot, row=0, col=0)
+        self.math_widget.addItem(self.math_plot, row=0, col=0)
         self.logic_plot.setXLink(self.analog_plot)
+        self.math_plot.setXLink(self.analog_plot)
+        self.math_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.math_legend = self.math_plot.addLegend(offset=(-10, 10))
         self.logic_plot.setMouseEnabled(x=True, y=False)
         self.legend = self.analog_plot.addLegend(offset=(-10, 10))
 
@@ -88,9 +97,10 @@ class LiveGraphController(QtCore.QObject):
         self.cfg = cfg
         self.frame = None
         for key, curve in self.curves.items():
-            (self.analog_plot if key[0] == "A" else self.logic_plot).removeItem(curve)
+            self._plot_of(key).removeItem(curve)
         self.curves.clear()
         self.legend.clear()
+        self.math_legend.clear()
         self.availability_changed.emit("analog", bool(cfg.analog_signals))
         self.availability_changed.emit("logic", cfg.has_logic)
         self.logic_plot.setXLink(self.analog_plot if cfg.analog_signals else None)
@@ -133,6 +143,38 @@ class LiveGraphController(QtCore.QObject):
         self.analog_plot.setLimits(xMin=-0.05 * span, xMax=1.05 * span)
         self._apply_y_range()
         self.analog_plot.setTitle("En attente de données")
+
+    def _plot_of(self, key) -> pg.PlotItem:
+        return {"A": self.analog_plot, "L": self.logic_plot, "M": self.math_plot}[key[0]]
+
+    # ------------------------------------------------------------------ voies calculées
+    def set_math_engine(self, engine):
+        self.math_engine = engine
+
+    def configure_math(self):
+        """Courbes des voies calculées actives (formules modifiées, autre configuration)."""
+        for key in [k for k in self.curves if k[0] == "M"]:
+            self.math_plot.removeItem(self.curves.pop(key))
+        self.math_legend.clear()
+        active = self.math_engine.active if self.math_engine is not None else []
+        for i, item in enumerate(active):
+            key = ("M", item.name)
+            label = f"{item.name} ({item.unit})" if item.unit else item.name
+            curve = self.math_plot.plot(pen=pens.pen(pens.math_color(i), width=1.5), name=label)
+            curve.setVisible(key not in self.hidden)
+            self.curves[key] = curve
+        unit = {item.unit for item in active}
+        self.math_plot.setLabel("left", "Voies calculées",
+                                units=unit.pop() if len(unit) == 1 and active else None)
+        self.availability_changed.emit("math", bool(active))
+        self._dirty = self.frame is not None
+
+    def math_results(self, frame: Frame | None = None) -> dict:
+        """{nom : tableau} des voies calculées de la trame (affichée par défaut)."""
+        frame = frame or self.frame
+        if frame is None or self.math_engine is None:
+            return {}
+        return self.math_engine.evaluate(frame)[0]
 
     def set_auto_range(self, enabled: bool):
         self.auto_range = enabled
@@ -188,6 +230,17 @@ class LiveGraphController(QtCore.QObject):
                 if curve is not None:
                     curve.setData(t, bit + self.LOGIC_HEIGHT * frame.logic[:, bit],
                                   skipFiniteCheck=True)
+        if self.math_engine is not None and self.math_engine.active:
+            results, errors = self.math_engine.evaluate(frame)
+            for item in self.math_engine.active:
+                curve = self.curves.get(("M", item.name))
+                if curve is None:
+                    continue
+                if item.name in results:
+                    curve.setData(t, results[item.name])
+                else:
+                    curve.setData([], [])
+            self.math_errors.emit(errors)
         title = f"Trame {frame.index}" + getattr(self, "_title_suffix", "")
         self.analog_plot.setTitle(title)
         if not self.cfg.analog_signals:
@@ -224,6 +277,7 @@ class LiveGraphController(QtCore.QObject):
         values = {("A", s): float(frame.analog[i, j]) for j, s in enumerate(frame.analog_signals)}
         if frame.logic is not None:
             values.update({("L", b): int(frame.logic[i, b]) for b in range(16)})
+        values.update({("M", name): float(y[i]) for name, y in self.math_results(frame).items()})
         return values
 
     def _emit_cursor_values(self, *_):

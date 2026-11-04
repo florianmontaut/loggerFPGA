@@ -79,6 +79,8 @@ logger_app/
 │   ├── protocol.py                trames UDP (construction / décodage), Frame
 │   ├── recorder.py                enregistrement : un fichier csv (colonne trame) + .json, ou npz
 │   ├── frame_buffer.py            mémoire tampon des dernières trames
+│   ├── formula/                   moteur de formules du GLviewer (copie, voir son __init__)
+│   ├── math_channels.py           voies calculées : fonctions temps réel, unités, évaluation
 │   ├── spectrum.py                FFT : fenêtres, amplitudes calibrées, moyennage, pics, THD
 │   └── measures.py                mesures entre deux curseurs (Δt, Δy, min, max, moyenne, efficace)
 ├── controller/
@@ -88,6 +90,7 @@ logger_app/
 │   ├── channel_tree_controller.py arborescence des voies (visibilité, valeur sous le curseur)
 │   ├── graph_controller.py        graphique temps réel (analogique + logique, seuil, curseur)
 │   ├── fft_controller.py          spectre temps réel et réglages FFT
+│   ├── math_controller.py         groupe « Voies calculées » (formules, état)
 │   ├── buffer_controller.py       onglet Trames : mémoire tampon, relecture, sauvegarde, confirmations
 │   ├── cursor_controller.py       curseurs de mesure (t1/t2, y1/y2) et mesures associées
 │   ├── detach_controller.py       graphiques déportables dans leur propre fenêtre (écran déporté)
@@ -221,6 +224,57 @@ trame,temps_s,I_HV (V),V_PH1_INV2 (V),K_HV,K_PRE,L2,...
 Les trames enregistrées par ce bouton sont marquées ✓ dans la mémoire tampon : elles ne
 sont pas proposées à nouveau avant de quitter.
 
+### Voies calculées (MATH)
+
+Comme les voies MATH d'un oscilloscope : des formules sur les voies de chaque trame,
+recalculées en temps réel et en relecture de la mémoire tampon. Groupe **Voies
+calculées** de l'arbre des paramètres : *Ajouter une voie calculée*, puis *Nom*,
+*Formule*, *Unité* (vide : déduite de la formule), *Affichée*, *État*, *Supprimer*
+(8 voies au plus).
+
+```
+P_INV1     [V_PH1_INV1]*[I_PH1_INV1]        unité déduite : W (si V et A sont renseignées)
+I_moy      movavg([I_HV]; 64)               moyenne glissante sur 64 points
+dV/dt      deriv([V_HV])                    V/s
+I_eff      rms([I_HV])                      valeur efficace de la trame (droite horizontale)
+ET         [K_HV]*[K_PRE]                   combinaison de voies logiques (0/1)
+Pmoy       avg([P_INV1])                    réutilise une voie calculée définie plus haut
+```
+
+* **Voies** : `[nom]` (analogique ou logique, espaces admis), `A0`…`A14` par numéro,
+  `L0`…`L15` par bit, `[voie calculée]` définie plus haut dans la liste, `time` (temps
+  depuis le début de la trame, en s). L'entrée *Voies et fonctions* du groupe les liste
+  pour la configuration courante.
+* **Fonctions du GLviewer** : `sin cos tan exp log` (népérien) `log10 sqrt abs` ;
+  `max min sum avg` (un argument : valeur sur la trame ; plusieurs : point par point) ;
+  tables `steps` et `interp` ; propriétés de l'eau et de l'air. Les arguments sont séparés
+  par `;`.
+* **Fonctions ajoutées pour les trames** : `deriv(x)`, `integ(x)` (depuis le début de la
+  trame), `movavg(x; n)` (moyenne glissante centrée), `rms(x)`, `pkpk(x)`.
+* **Affichage** : panneau *Voies calculées* entre les voies analogiques et logiques, avec
+  le même axe des temps, déportable comme les autres. Les voies calculées apparaissent
+  aussi dans l'arborescence (visibilité, valeur sous le curseur, Δ entre t1 et t2), et les
+  curseurs t1/t2 traversent ce panneau.
+* **Réactivité** : chaque modification est appliquée tout de suite, même pendant
+  l'acquisition. L'*État* indique l'unité obtenue (✓ W), une formule invalide ou une voie
+  inconnue, et les erreurs de calcul sur la trame affichée (division par zéro…).
+* **Configuration** : les définitions sont enregistrées avec elle (JSON, dernière
+  configuration utilisée).
+
+**Moteur** : celui du GLviewer (`model/formula`, lexer → parser → arbre → interpréteur
+numpy, analyse des unités), copié sans modification à l'exception de `errors.py`. Les
+ajouts propres au logger (fonctions qui ont besoin de la fréquence d'échantillonnage,
+unités lisibles comme V², V·A, V/s) sont dans `model/math_channels.py`, par sous-classes,
+pour pouvoir reprendre telles quelles les évolutions du GLviewer. Les tests du moteur du
+GLviewer sont repris dans `tests/glviewer_formula`. Coût mesuré : moins de 0,2 ms par
+formule et par trame de 16 384 points.
+
+Limites actuelles : la FFT et les *Mesures* des curseurs portent sur les voies
+analogiques seulement, et les voies calculées ne sont pas écrites dans les fichiers
+d'enregistrement.
+
+![voies calculées](docs/capture_voies_calculees.png)
+
 ### Curseurs de mesure
 
 Groupe *Curseurs* de l'arbre des paramètres, sur le modèle des curseurs du GLviewer
@@ -344,7 +398,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-64 tests : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, acquisition complète contre le
+165 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes

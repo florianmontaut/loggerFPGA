@@ -28,7 +28,9 @@ from controller.cursor_controller import CursorController
 from controller.detach_controller import DetachController
 from controller.fft_controller import FFTController
 from controller.graph_controller import LiveGraphController
+from controller.math_controller import MathController
 from model.config import ConfigError, LoggerConfig
+from model.math_channels import definitions_from_config
 from view.main_window import MainWindow
 
 STATE_LABELS = {"IDLE": "Arrêté", "CONFIG": "Configuration", "WAIT_TRIG": "Armé",
@@ -71,11 +73,15 @@ class MainController(QtCore.QObject):
 
         self.config_ctrl = ConfigController(view.configtree, resolve_record_dir(cfg))
         self.tree_ctrl = ChannelTreeController(view.treechannels)
-        self.graph_ctrl = LiveGraphController(view.analoggraph, view.logicgraph)
+        self.graph_ctrl = LiveGraphController(view.analoggraph, view.logicgraph, view.mathgraph)
         self.cursor_ctrl = CursorController(self.graph_ctrl, view.configtree)
         # réglages de l'interface conservés d'une session à l'autre (fenêtres déportées,
         # axe des fréquences de la FFT)
         self.settings = QtCore.QSettings("LoggerFPGA", "logger_app") if remember else None
+        # voies calculées (MATH) : formules sur les voies de chaque trame
+        self.math_ctrl = MathController(view.configtree,
+                                        definitions_from_config(self.config_ctrl.cfg))
+        self.graph_ctrl.set_math_engine(self.math_ctrl.engine)
         self.fft_ctrl = FFTController(view.fftgraph, view.configtree, self.settings)
         # graphiques déportables (écran déporté) ; position des fenêtres mémorisée
         self.detach_ctrl = DetachController(
@@ -83,11 +89,14 @@ class MainController(QtCore.QObject):
             self.settings)
         self.detach_ctrl.register("analog", "Voies analogiques", view.analoggraph,
                                   [self.graph_ctrl.analog_plot], weight=3)
+        self.detach_ctrl.register("math", "Voies calculées", view.mathgraph,
+                                  [self.graph_ctrl.math_plot], weight=2)
         self.detach_ctrl.register("logic", "Voies logiques", view.logicgraph,
                                   [self.graph_ctrl.logic_plot], weight=2)
         self.detach_ctrl.register("fft", "Spectre (FFT)", view.fftgraph,
                                   [self.fft_ctrl.plot], weight=2)
         self.detach_ctrl.set_available("fft", False)
+        self.detach_ctrl.set_available("math", False)
         self.graph_ctrl.availability_changed.connect(self.detach_ctrl.set_available)
         self.acq_ctrl = AcquisitionController()
         # mémoire tampon des dernières trames, onglet Trames
@@ -148,6 +157,12 @@ class MainController(QtCore.QObject):
         self.graph_ctrl.fps_changed.connect(lambda fps: v.fpsLabel.setText(f"{fps:.0f} img/s"))
         self.tree_ctrl.visibility_changed.connect(self.graph_ctrl.set_visible)
 
+        # voies calculées : appliquées tout de suite, gardées dans la configuration
+        self.math_ctrl.changed.connect(self._on_math_changed)
+        self.math_ctrl.definitions_changed.connect(
+            lambda defs: setattr(self.config_ctrl.cfg, "math_channels", defs))
+        self.graph_ctrl.math_errors.connect(self.math_ctrl.show_runtime_errors)
+
         # FFT : mêmes trames, même pause, mêmes voies visibles que le graphique temporel
         v.actionFFT.toggled.connect(self.fft_ctrl.set_enabled)
         v.actionFFT.toggled.connect(lambda on: self.detach_ctrl.set_available("fft", on))
@@ -186,6 +201,13 @@ class MainController(QtCore.QObject):
         self.graph_ctrl.show_frame(frame, suffix)
         self.fft_ctrl.show_frame(frame)
 
+    def _on_math_changed(self):
+        """Voies calculées modifiées : courbes, arborescence et curseurs mis à jour."""
+        self.graph_ctrl.configure_math()
+        self.tree_ctrl.set_math_channels(
+            [(item.name, item.unit) for item in self.math_ctrl.engine.active])
+        self.cursor_ctrl.refresh()
+
     def _on_config_changed(self, cfg: LoggerConfig):
         self.buffer_ctrl.set_capacity(cfg.buffer_frames)
         self._apply_preview(cfg)
@@ -201,6 +223,7 @@ class MainController(QtCore.QObject):
         self.graph_ctrl.configure(cfg)
         self.cursor_ctrl.configure(cfg)
         self.fft_ctrl.configure(cfg)
+        self.math_ctrl.set_config(cfg)          # -> _on_math_changed
 
     def _on_graph_values(self, values: dict):
         """Valeurs sous le curseur simple (double-clic), sauf si les curseurs t1/t2 sont actifs."""
@@ -286,6 +309,7 @@ class MainController(QtCore.QObject):
             QtWidgets.QMessageBox.warning(self.view, "Ouverture impossible", str(exc))
             return
         self.config_ctrl.set_config(resolve_record_dir(cfg))
+        self.math_ctrl.set_definitions(definitions_from_config(cfg))
         self._apply_preview(cfg)
         self.view.show_message(f"Configuration chargée : {path}")
 

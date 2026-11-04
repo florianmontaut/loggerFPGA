@@ -30,3 +30,13 @@ def swatch(color: str, size: int = 12) -> QtGui.QIcon:
     painter.drawRoundedRect(1, 1, size - 2, size - 2, 2, 2)
     painter.end()
     return QtGui.QIcon(pix)
+
+
+# voies calculées : couleurs vives distinctes des voies mesurées (comme les MATH des
+# oscilloscopes)
+MATH_COLORS = ["#ff4fd8", "#ffd400", "#00e5ff", "#7cfc00", "#ff8c42", "#b388ff",
+               "#ffffff", "#ff5252"]
+
+
+def math_color(index: int) -> str:
+    return MATH_COLORS[index % len(MATH_COLORS)]

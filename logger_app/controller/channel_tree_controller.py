@@ -50,7 +50,7 @@ class ChannelTreeController(QtCore.QObject):
         self.view.setColumnHidden(self.DELTA, True)   # visible avec les curseurs verticaux
 
     def build(self, cfg: LoggerConfig):
-        self.model.blockSignals(True)
+        self._building = True
         self.model.removeRows(0, self.model.rowCount())
         self.items.clear()
         fs = cfg.sample_rate
@@ -73,8 +73,32 @@ class ChannelTreeController(QtCore.QObject):
             for bit in range(16):
                 self._channel(group[0], ("L", bit), cfg.logic_name(bit), "",
                               pens.logic_color(bit))
-        self.model.blockSignals(False)
+        self._math_group = None
+        self._building = False
         self.view.expandAll()
+
+    def set_math_channels(self, channels: list[tuple[str, str]]):
+        """Groupe « Voies calculées » : [(nom, unité)], sous les voies analogiques."""
+        root = self.model.item(0)
+        if root is None:
+            return
+        self._building = True
+        group = getattr(self, "_math_group", None)
+        if group is not None:
+            for key in [k for k in self.items if k[0] == "M"]:
+                del self.items[key]
+            root.removeRow(group.row())
+            self._math_group = None
+        if channels:
+            row = self._row("Voies calculées", "", "")
+            has_analog = root.rowCount() and root.child(0).text() == "Voies analogiques"
+            root.insertRow(1 if has_analog else 0, row)
+            self._math_group = row[0]
+            for i, (name, unit) in enumerate(channels):
+                self._channel(row[0], ("M", name), name, unit, pens.math_color(i))
+        self._building = False
+        if channels:
+            self.view.expand(self._math_group.index())
 
     def _row(self, *texts):
         row = [QtGui.QStandardItem(t) for t in texts]
@@ -125,6 +149,11 @@ class ChannelTreeController(QtCore.QObject):
             self.set_values(deltas or {}, self.DELTA)
 
     def _on_item_changed(self, item: QtGui.QStandardItem):
+        # construction en cours : cases cochées par le programme, pas par l'utilisateur.
+        # (Les signaux du modèle ne sont pas bloqués : la vue doit être prévenue des
+        # lignes ajoutées et retirées, sinon elle garde des index périmés et plante.)
+        if getattr(self, "_building", False):
+            return
         key = item.data(KEY_ROLE)
         if key is None or not item.isCheckable():
             return

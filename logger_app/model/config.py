@@ -79,6 +79,8 @@ class LoggerConfig:
     record_format:  str = "csv"      # "csv" ou "npz"
     # mémoire tampon : nombre de trames gardées en mémoire (model/frame_buffer.py)
     buffer_frames:  int = 64
+    # voies calculées : [{"name", "formula", "unit", "enabled"}] (model/math_channels.py)
+    math_channels:  list[dict] = field(default_factory=list)
     # --- description des voies ---
     analog_names:   list[str] = field(default_factory=lambda: list(DEFAULT_ANALOG_NAMES))
     logic_names:    list[str] = field(default_factory=lambda: list(DEFAULT_LOGIC_NAMES))

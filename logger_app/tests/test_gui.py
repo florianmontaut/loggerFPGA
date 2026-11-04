@@ -216,8 +216,8 @@ def test_detach_fft_window(setup):
     qapp, sim, window, ctrl = setup
     det = ctrl.detach_ctrl
     split = window.graph_splitter
-    assert [split.widget(i) for i in range(3)] == [window.analoggraph, window.logicgraph,
-                                                   window.fftgraph]
+    assert [split.widget(i) for i in range(4)] == [window.analoggraph, window.mathgraph,
+                                                   window.logicgraph, window.fftgraph]
     window.actionFFT.setChecked(True)
     det.detach("fft")
     fft_window = det.window_of("fft")
@@ -249,8 +249,8 @@ def test_detach_fft_window(setup):
     fft_window.close()
     qapp.processEvents()
     assert not det.is_detached("fft")
-    assert split.indexOf(window.fftgraph) == 2 and window.fftgraph.isVisible()
-    assert not window.menuWindows.actions()[2].isChecked()
+    assert split.indexOf(window.fftgraph) == 3 and window.fftgraph.isVisible()
+    assert not window.menuWindows.actions()[3].isChecked()
 
 
 def test_detach_all_and_restore(setup, tmp_path):
@@ -301,9 +301,12 @@ def test_record_button_during_acquisition(setup, tmp_path, monkeypatch):
         lines = path.read_text().splitlines()[1:]       # en-tête seul : pas encore de trame
         return {int(line.split(",", 1)[0]) for line in lines if line}
     assert window.actionRecord.isEnabled()
+    messages = []
+    ctrl.acq_ctrl.recording_changed.connect(lambda on, path: messages.append((on, path)))
     window.actionStart.trigger()
     assert wait(qapp, lambda: ctrl.graph_ctrl.frame is not None)
     assert csvs() == []
+    assert messages == []           # pas d'« enregistrement arrêté » sans enregistrement
     # clic sur Enregistrer pendant l'acquisition : un fichier, qui grandit trame après trame
     assert window.actionRecord.isEnabled()
     window.actionRecord.trigger()
@@ -537,3 +540,81 @@ def test_fft_frequency_axis_log_or_linear(setup, tmp_path):
     assert other.log_x and other.plot.ctrl.logXCheck.isChecked()
     other.set_log_x(False)
     assert settings.value(SETTINGS_KEY) == "Linéaire"
+
+
+def test_math_channels_live(setup):
+    """Voies calculées : panneau, arborescence, curseurs, erreurs, configuration."""
+    qapp, sim, window, ctrl = setup
+    math = ctrl.math_ctrl
+    assert not window.mathgraph.isVisible()                # aucune voie calculée
+    math.add()
+    group = math._groups()[0]
+    assert group.child("Formule").value() == "[I_HV]"      # première voie proposée
+    group.child("Nom").setValue("P")
+    group.child("Formule").setValue("[I_HV]*[V_PH1_INV2]")
+    assert group.child("État").value() == "✓ V²"
+    assert window.mathgraph.isVisible()
+    assert "[V_PH1_INV1_RMS]" in math.params.child("Voies et fonctions").value()
+
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: ctrl.graph_ctrl.frame is not None)
+    wait(qapp, lambda: False, 0.2)
+    window.actionPause.setChecked(True)                    # trame figée pour comparer
+    wait(qapp, lambda: False, 0.1)
+    frame = ctrl.graph_ctrl.frame
+    x, y = ctrl.graph_ctrl.curves[("M", "P")].getData()
+    np.testing.assert_allclose(y, frame.analog[:, 0] * frame.analog[:, 1])
+    # arborescence : groupe Voies calculées, valeur sous le curseur
+    assert ("M", "P") in ctrl.tree_ctrl.items
+    assert ctrl.tree_ctrl.items[("M", "P")][1].text() != ""
+    # curseurs verticaux : Δ de la voie calculée
+    ctrl.cursor_ctrl.set_type("Verticaux")
+    assert ctrl.cursor_ctrl.v_lines["math"][0] in ctrl.graph_ctrl.math_plot.items
+    i1, i2 = 100, 900
+    ctrl.cursor_ctrl.set_vertical(i1 / frame.sample_rate, i2 / frame.sample_rate)
+    expected = y[i2] - y[i1]
+    assert float(ctrl.tree_ctrl.items[("M", "P")][3].text()) == pytest.approx(expected, rel=1e-4)
+
+    # deuxième voie : réutilise la première, modifiée en direct
+    math.add()
+    second = math._groups()[1]
+    name = second.child("Nom").value()
+    assert name == "M1"                                    # premier nom libre
+    second.child("Formule").setValue("rms([P])")
+    wait(qapp, lambda: False, 0.1)
+    assert ctrl.graph_ctrl.curves[("M", name)].getData()[1][0] == pytest.approx(
+        np.sqrt(np.mean(y ** 2)), rel=1e-6)
+    # formule invalide : signalée, non tracée
+    second.child("Formule").setValue("[P]*")
+    assert second.child("État").value().startswith("⚠") and ("M", name) not in ctrl.graph_ctrl.curves
+    # erreur de calcul sur la trame
+    second.child("Formule").setValue("1/0")
+    wait(qapp, lambda: False, 0.1)
+    ctrl.graph_ctrl.show_frame(frame)
+    wait(qapp, lambda: False, 0.1)
+    assert "Division by zero" in second.child("État").value()
+    window.grab().save(str(SHOTS / "logger_math.png"))
+    window.actionPause.setChecked(False)
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+
+    # gardées dans la configuration (enregistrée en JSON, relue au démarrage)
+    saved = ctrl.config_ctrl.read_tree().math_channels
+    assert saved[0] == {"name": "P", "formula": "[I_HV]*[V_PH1_INV2]", "unit": "",
+                        "enabled": True}
+    math.remove(math._groups()[0])
+    assert ("M", "P") not in ctrl.graph_ctrl.curves
+    math.remove(math._groups()[0])
+    assert not window.mathgraph.isVisible()
+
+
+def test_math_channels_loaded_with_config(setup, tmp_path):
+    qapp, sim, window, ctrl = setup
+    cfg = ctrl.config_ctrl.read_tree()
+    cfg.math_channels = [{"name": "Somme", "formula": "A1+A4", "unit": "V", "enabled": True}]
+    path = tmp_path / "cfg.json"
+    cfg.save(str(path))
+    ctrl.load_config(str(path))
+    group = ctrl.math_ctrl._groups()[0]
+    assert group.child("Formule").value() == "A1+A4" and group.child("État").value() == "✓ V"
+    assert ("M", "Somme") in ctrl.graph_ctrl.curves and window.mathgraph.isVisible()

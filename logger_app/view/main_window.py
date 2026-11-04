@@ -159,6 +159,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # graphiques, chacun déportable dans sa propre fenêtre (controller/detach_controller)
         self.analoggraph = pg.GraphicsLayoutWidget()    # voies analogiques
+        self.mathgraph = pg.GraphicsLayoutWidget()      # voies calculées (MATH)
+        self.mathgraph.hide()
         self.logicgraph = pg.GraphicsLayoutWidget()     # voies logiques
         self.fftgraph = pg.GraphicsLayoutWidget()       # spectre, si l'action FFT est cochée
         self.fftgraph.hide()
@@ -167,7 +169,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Graphiques déportés dans leurs fenêtres\n(menu Fenêtres pour les réintégrer)")
         self.graph_placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.graph_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        for widget in (self.analoggraph, self.logicgraph, self.fftgraph,
+        for widget in (self.analoggraph, self.mathgraph, self.logicgraph, self.fftgraph,
                        self.graph_placeholder):
             self.graph_splitter.addWidget(widget)
         self.graph_splitter.setChildrenCollapsible(False)
