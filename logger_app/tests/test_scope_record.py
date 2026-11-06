@@ -1,4 +1,7 @@
 """Enregistrements longs d'oscilloscope : import CSV Tektronix -> HDF5, lecture."""
+import json
+import os
+
 import h5py
 import numpy as np
 import pytest
@@ -122,3 +125,52 @@ def test_channel_names_from_metadata_rows(tmp_path):
     rec = sr.ScopeRecord(sr.import_tek_csv([path], str(tmp_path / "rec.h5")))
     assert rec.names == ["V_HV", "I_HV"]
     np.testing.assert_array_equal(rec.read_window(0, 10).data["I_HV"], np.ones(10))
+
+
+def test_append_csv_and_h5_channels(tmp_path):
+    """Un CSV par voie (Tektronix) : voies ajoutées une à une au même enregistrement."""
+    n = 30_000
+    a = tek_csv(tmp_path / "tek0000CH1.csv", [np.sin(np.arange(n) / 100)])
+    b = tek_csv(tmp_path / "tek0000CH2.csv", [np.cos(np.arange(n) / 100)])
+    c = tek_csv(tmp_path / "tek0000CH3.csv", [np.arange(n, dtype=float)])
+    h5_path = sr.import_tek_csv([a], str(tmp_path / "rec.h5"))
+    steps = []
+    assert sr.append_to_workspace(h5_path, [b], progress=lambda f, t: steps.append(f)) == ["CH2"]
+    assert steps[-1] == 1.0
+    # un .h5 (ex. une autre conversion) : voies copiées avec leur pyramide ; nom déjà pris
+    other = sr.import_tek_csv([c], str(tmp_path / "autre.h5"))
+    with h5py.File(other, "a") as h5:
+        h5.move("signals/CH1", "signals/CH2")         # même nom qu'une voie existante
+    assert sr.append_to_workspace(h5_path, [other]) == ["CH2_2"]
+    rec = sr.ScopeRecord(h5_path)
+    assert rec.names == ["CH1", "CH2", "CH2_2"]
+    np.testing.assert_allclose(rec.read_window(0, 5).data["CH2"], np.cos(np.arange(5) / 100),
+                               atol=1e-6)
+    w = rec.read_window(0, n, max_raw=1000)
+    assert w.envelope and w.data["CH2_2"].max() == pytest.approx(n - 1)
+    rec.close()
+    with h5py.File(h5_path, "r") as h5:
+        assert json.loads(h5.attrs["source_files"]) == ["tek0000CH1.csv", "tek0000CH2.csv",
+                                                         "autre.h5"]
+        assert h5.attrs["signal_count"] == 3
+
+
+def test_append_refuses_other_acquisition_and_keeps_file(tmp_path):
+    a = tek_csv(tmp_path / "a.csv", [np.zeros(10_000)])
+    h5_path = sr.import_tek_csv([a], str(tmp_path / "rec.h5"))
+    before = open(h5_path, "rb").read()
+    cases = {
+        "points": tek_csv(tmp_path / "court.csv", [np.zeros(9_000)]),
+        "échantillonnage": tek_csv(tmp_path / "dt.csv", [np.zeros(10_000)], dt=DT * 2),
+        "commence": tek_csv(tmp_path / "t0.csv", [np.zeros(10_000)], t0=T0 + 1),
+    }
+    for message, path in cases.items():
+        with pytest.raises(sr.ScopeError, match=message):
+            sr.append_to_workspace(h5_path, [path])
+    with pytest.raises(sr.ImportCancelled):
+        sr.append_to_workspace(h5_path, [tek_csv(tmp_path / "b.csv", [np.ones(10_000)])],
+                               chunk_rows=2_000, cancelled=lambda: True)
+    with pytest.raises(sr.ScopeError, match="lui-même"):
+        sr.append_to_workspace(h5_path, [h5_path])
+    assert open(h5_path, "rb").read() == before            # intact
+    assert not os.path.exists(h5_path + ".partiel")

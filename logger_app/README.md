@@ -273,8 +273,29 @@ les métadonnées des premières lignes (`Record Length`, `Sample Interval`, `Tr
 Point`, `Trigger Time`, `Horizontal Offset`), colonne 3 pour le temps, colonnes 4, 5…
 pour les signaux. Noms des voies (même règle que `csv_to_hdf5.py`) : les lignes de
 métadonnées supplémentaires, une par voie dans l'ordre des colonnes, sinon CH1, CH2….
-Plusieurs fichiers d'une voie chacun (mêmes instants) sont réunis, avec le nom du fichier
-ou le `CHn` qu'il contient (`tek0000CH2.csv` → CH2).
+
+**Un fichier par voie (Tektronix).** L'oscilloscope écrit un CSV par voie. Deux façons
+de les réunir dans un même enregistrement :
+* **les choisir ensemble** dans *Ouvrir un enregistrement...* (Ctrl+clic ou Maj+clic,
+  comme l'indique le titre de la boîte de dialogue) : un seul `.h5` est créé
+  (`<premier fichier>_voies.h5`) ;
+* **les ajouter au fur et à mesure** : *Fichier › Ajouter des voies à
+  l'enregistrement...*, ou simplement *Ouvrir un enregistrement...* sur un enregistrement
+  déjà affiché, puis **Ajouter les voies** (ou **Remplacer**, ou *Annuler*). Un `.h5`
+  peut aussi être ajouté : ses voies sont copiées avec leur pyramide. La portion affichée
+  est conservée.
+
+Les voies réunies doivent venir de la même acquisition : même intervalle
+d'échantillonnage, même nombre de points, même premier instant. Sinon l'ajout est refusé
+avec un message, et l'enregistrement reste inchangé. L'ajout s'écrit dans une copie du
+`.h5`, qui ne remplace l'original qu'en cas de succès : une annulation ou une erreur ne
+l'abîme pas.
+
+Noms des voies : `CHn` tiré du nom de fichier (`tek0000CH2.csv` → CH2), sinon le nom du
+fichier ; un nom déjà pris reçoit un suffixe (`CH2_2`). Les lignes de noms dans les
+métadonnées, s'il y en a une par voie, restent prioritaires.
+
+![quatre voies, un fichier par voie](docs/capture_oscilloscope_4_voies.png)
 
 **Conversion en HDF5.** Elle a lieu une seule fois, en arrière-plan, avec une barre de
 progression annulable. Le `.h5` est écrit à côté du CSV et réutilisé tant qu'il est plus
@@ -483,7 +504,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-188 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, acquisition complète contre le
+193 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes

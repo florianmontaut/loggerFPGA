@@ -28,7 +28,8 @@ from model import measures
 from model.config import LoggerConfig
 from model.protocol import Frame
 from model.scope_record import (MAX_RAW_POINTS, ImportCancelled, ScopeError, ScopeRecord,
-                                default_h5_path, import_tek_csv, is_tek_csv)
+                                append_to_workspace, default_h5_path, import_tek_csv,
+                                is_tek_csv)
 from ressources import pens
 
 RELOAD_DELAY_MS = 60               # regroupe les changements de zoom rapprochés
@@ -40,13 +41,17 @@ def is_scope_file(path: str) -> bool:
 
 
 class ImportWorker(QtCore.QThread):
+    """
+    Conversion ou ajout de voies dans un thread : task(progress, cancelled) renvoie le
+    chemin du workspace HDF5 à ouvrir.
+    """
     progress = QtCore.pyqtSignal(float, str)
     succeeded = QtCore.pyqtSignal(str)
     failed = QtCore.pyqtSignal(str)
 
-    def __init__(self, paths: list[str], h5_path: str):
+    def __init__(self, task):
         super().__init__()
-        self.paths, self.h5_path = paths, h5_path
+        self.task = task
         self._cancel = False
 
     def cancel(self):
@@ -54,15 +59,50 @@ class ImportWorker(QtCore.QThread):
 
     def run(self):
         try:
-            path = import_tek_csv(self.paths, self.h5_path,
-                                  progress=lambda f, text: self.progress.emit(f, text),
-                                  cancelled=lambda: self._cancel)
+            path = self.task(lambda f, text: self.progress.emit(f, text),
+                             lambda: self._cancel)
         except ImportCancelled:
             self.failed.emit("")
         except (ScopeError, OSError, ValueError) as exc:
             self.failed.emit(str(exc))
         else:
             self.succeeded.emit(path)
+
+
+class ProgressDialog(QtWidgets.QDialog):
+    """
+    Avancement d'une conversion, modal pour la fenêtre principale. Pas de QProgressDialog :
+    en modal, son setValue() relance la boucle d'événements, où la fin de la conversion
+    pouvait fermer la boîte pendant sa propre mise à jour (plantage). Ici la mise à jour
+    ne fait que changer la barre et le texte.
+    """
+    canceled = QtCore.pyqtSignal()
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Enregistrement d'oscilloscope")
+        self.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        self.label = QtWidgets.QLabel(title)
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setRange(0, 1000)
+        button = QtWidgets.QPushButton("Annuler")
+        button.clicked.connect(self._cancel)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(self.label)
+        layout.addWidget(self.bar)
+        layout.addWidget(button, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+        self.setMinimumWidth(420)
+
+    def update_progress(self, fraction: float, text: str):
+        self.label.setText(text)
+        self.bar.setValue(int(fraction * 1000))
+
+    def _cancel(self):
+        self.label.setText("Annulation...")
+        self.canceled.emit()
+
+    def reject(self):                       # Échap / croix : annuler
+        self._cancel()
 
 
 class ScopeController(QtCore.QObject):
@@ -82,6 +122,8 @@ class ScopeController(QtCore.QObject):
         self.progress_dialog: QtWidgets.QProgressDialog | None = None
         self._syncing = False
         self._window_key = None
+        self._after_import = None           # ajout de voies : (portion affichée, voies)
+        self._failed_reopen = None          # ajout de voies : enregistrement à rouvrir
         self.max_raw = MAX_RAW_POINTS     # au-delà : enveloppe min/max
 
         self.overview_plot = pg.PlotItem()
@@ -130,12 +172,33 @@ class ScopeController(QtCore.QObject):
         return True
 
     def _start_import(self, paths, h5_path):
-        self.worker = ImportWorker(paths, h5_path)
-        dialog = QtWidgets.QProgressDialog("Conversion de l'enregistrement...", "Annuler",
-                                           0, 1000, self.view)
-        dialog.setWindowTitle("Enregistrement d'oscilloscope")
-        dialog.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
-        dialog.setMinimumDuration(0)
+        self._run(lambda progress, cancelled: import_tek_csv(
+            paths, h5_path, progress=progress, cancelled=cancelled),
+            "Conversion de l'enregistrement...")
+
+    # ------------------------------------------------------------------ ajout de voies
+    def append(self, paths: list[str]) -> bool:
+        """
+        Ajoute à l'enregistrement affiché les voies d'autres fichiers (un CSV Tektronix par
+        voie, ou un autre .h5), même acquisition. La portion affichée est conservée.
+        """
+        if self.record is None or self.worker is not None:
+            return False
+        paths = [os.path.abspath(p) for p in paths]
+        target = self.record.path
+        view = tuple(self.graph.analog_plot.vb.viewRange()[0])
+        before = list(self.record.names)
+        self.close(emit=False)              # fichier libéré pendant l'écriture
+        self._after_import = (view, before)
+        self._failed_reopen = target
+        self._run(lambda progress, cancelled: (
+            append_to_workspace(target, paths, progress=progress, cancelled=cancelled),
+            target)[1], "Ajout des voies...")
+        return True
+
+    def _run(self, task, title: str):
+        self.worker = ImportWorker(task)
+        dialog = ProgressDialog(title, self.view)
         dialog.canceled.connect(self.worker.cancel)
         self.progress_dialog = dialog
         self.worker.progress.connect(self._on_progress)
@@ -147,27 +210,41 @@ class ScopeController(QtCore.QObject):
 
     def _on_progress(self, fraction: float, text: str):
         if self.progress_dialog is not None:
-            self.progress_dialog.setLabelText(text)
-            self.progress_dialog.setValue(int(fraction * 1000))
+            self.progress_dialog.update_progress(fraction, text)
 
     def _close_progress(self):
         if self.progress_dialog is not None:
             self.progress_dialog.canceled.disconnect()
-            self.progress_dialog.close()
+            # hide() et non close() : close() passe par reject(), qui annule
+            self.progress_dialog.hide()
             self.progress_dialog.deleteLater()
             self.progress_dialog = None
 
     def _on_imported(self, path: str):
         self._close_progress()
-        self.message.emit(f"Enregistrement converti : {path}")
-        self._open_h5(path)
+        appended = getattr(self, "_after_import", None)
+        self._after_import = self._failed_reopen = None
+        if appended is None:
+            self.message.emit(f"Enregistrement converti : {path}")
+            self._open_h5(path)
+            return
+        view, before = appended
+        if self._open_h5(path, view):
+            new = [n for n in self.record.names if n not in before]
+            self.message.emit(f"Voie(s) ajoutée(s) : {', '.join(new)} "
+                              f"({os.path.basename(path)})")
 
     def _on_import_failed(self, message: str):
         self._close_progress()
+        reopen = getattr(self, "_failed_reopen", None)
+        appended = getattr(self, "_after_import", None)
+        self._after_import = self._failed_reopen = None
         if message:
             self._error(message)
         else:
-            self.message.emit("Conversion annulée")
+            self.message.emit("Opération annulée")
+        if reopen:                          # ajout refusé : enregistrement inchangé, rouvert
+            self._open_h5(reopen, appended[0] if appended else None)
 
     def _on_worker_finished(self):
         worker, self.worker = self.worker, None
@@ -180,7 +257,7 @@ class ScopeController(QtCore.QObject):
             return True
         return self.worker.wait(timeout_ms)
 
-    def _open_h5(self, path: str) -> bool:
+    def _open_h5(self, path: str, view_range: tuple | None = None) -> bool:
         try:
             record = ScopeRecord(path)
         except ScopeError as exc:
@@ -193,7 +270,13 @@ class ScopeController(QtCore.QObject):
         self._build_overview()
         self.view.overviewgraph.show()
         self.view.actionCloseScope.setEnabled(True)
+        self.view.actionAddScopeChannels.setEnabled(True)
         self.opened.emit(self.cfg)            # le contrôleur principal configure l'affichage
+        if view_range is not None:            # même portion qu'avant (ajout de voies)
+            self.graph.analog_plot.setXRange(*view_range, padding=0)
+            self._syncing = True
+            self.region.setRegion(view_range)
+            self._syncing = False
         self.reload()
         return True
 
@@ -296,6 +379,7 @@ class ScopeController(QtCore.QObject):
         self.cfg = None
         self.view.overviewgraph.hide()
         self.view.actionCloseScope.setEnabled(False)
+        self.view.actionAddScopeChannels.setEnabled(False)
         if emit:
             self.closed.emit()
 

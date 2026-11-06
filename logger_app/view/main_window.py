@@ -96,6 +96,12 @@ class MainWindow(QtWidgets.QMainWindow):
                                              "Revenir à l'affichage du logger",
                                              icon=sp.SP_DialogCloseButton)
         self.actionCloseScope.setEnabled(False)
+        self.actionAddScopeChannels = self._action(
+            "Ajouter des voies à l'enregistrement...",
+            "Ajouter à l'enregistrement d'oscilloscope affiché les voies d'autres fichiers "
+            "(un CSV Tektronix par voie, ou un .h5) de la même acquisition",
+            icon=sp.SP_FileDialogNewFolder)
+        self.actionAddScopeChannels.setEnabled(False)
         self.actionAutoRange = self._action("Échelle auto", "Adapter l'échelle à chaque trame",
                                             checkable=True, icon=sp.SP_BrowserReload)
         self.actionAutoRange.setChecked(True)
@@ -117,7 +123,8 @@ class MainWindow(QtWidgets.QMainWindow):
         menu = self.menuBar().addMenu("Fichier")
         menu.addActions([self.actionLoadConfig, self.actionSaveConfig])
         menu.addSeparator()
-        menu.addActions([self.actionOpenRecording, self.actionCloseScope, self.actionSaveBuffer])
+        menu.addActions([self.actionOpenRecording, self.actionAddScopeChannels,
+                         self.actionCloseScope, self.actionSaveBuffer])
         menu.addSeparator()
         menu.addAction(self.actionQuit)
         menu = self.menuBar().addMenu("Acquisition")
