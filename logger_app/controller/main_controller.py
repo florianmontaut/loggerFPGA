@@ -143,6 +143,7 @@ class MainController(QtCore.QObject):
         v.actionSaveBuffer.triggered.connect(lambda: self.buffer_ctrl.save_dialog())
         v.actionOpenRecording.triggered.connect(self.open_recording_dialog)
         v.actionCloseScope.triggered.connect(lambda: self.scope_ctrl.close())
+        v.actionAddScopeChannels.triggered.connect(self.add_scope_channels_dialog)
         self.scope_ctrl.opened.connect(self._on_scope_opened)
         self.scope_ctrl.closed.connect(self._on_scope_closed)
         self.scope_ctrl.display_frame.connect(lambda frame: self._display_frame(frame, "scope"))
@@ -233,7 +234,8 @@ class MainController(QtCore.QObject):
             return
         directory = self._record_settings()[0]
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-            self.view, "Ouvrir un enregistrement", directory,
+            self.view, "Ouvrir un enregistrement — un CSV par voie d'oscilloscope : "
+            "Ctrl+clic pour les choisir ensemble", directory,
             "Enregistrements (*.csv *.npz *.h5 *.hdf5);;Logger FPGA (*.csv *.npz);;"
             "Oscilloscope : CSV Tektronix, HDF5 (*.csv *.h5 *.hdf5);;Tous les fichiers (*)")
         if paths:
@@ -248,6 +250,14 @@ class MainController(QtCore.QObject):
             return False
         scope = [is_scope_file(p) for p in paths]
         if all(scope):
+            if self.scope_ctrl.active:
+                # enregistrement déjà affiché : un CSV par voie chez Tektronix, on peut
+                # cumuler les chargements
+                choice = self._ask_add_or_replace(paths)
+                if choice == "add":
+                    return self.scope_ctrl.append(paths)
+                if choice != "replace":
+                    return False
             return self.scope_ctrl.open(paths)
         if len(paths) == 1:
             return self.open_recording(paths[0])
@@ -255,6 +265,33 @@ class MainController(QtCore.QObject):
             self.view, "Ouvrir un enregistrement",
             "Plusieurs fichiers : seulement des CSV d'oscilloscope (une voie par fichier).")
         return False
+
+    def add_scope_channels_dialog(self):
+        if not self.scope_ctrl.active:
+            return
+        directory = os.path.dirname(self.scope_ctrl.record.path)
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self.view, "Ajouter des voies — Ctrl+clic pour en choisir plusieurs", directory,
+            "Oscilloscope : CSV Tektronix, HDF5 (*.csv *.h5 *.hdf5);;Tous les fichiers (*)")
+        if paths:
+            self.scope_ctrl.append(paths)
+
+    def _ask_add_or_replace(self, paths: list[str]) -> str:
+        """Fichiers d'oscilloscope ouverts sur un enregistrement affiché : "add",
+        "replace" ou "cancel"."""
+        box = QtWidgets.QMessageBox(self.view)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        box.setWindowTitle("Enregistrement d'oscilloscope")
+        names = ", ".join(os.path.basename(p) for p in paths[:4]) + ("…" if len(paths) > 4 else "")
+        box.setText(f"Un enregistrement est affiché ({self.scope_ctrl.cfg.source_name}).\n"
+                    f"Ajouter les voies de {names} à cet enregistrement, ou le remplacer ?")
+        add = box.addButton("Ajouter les voies", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        replace = box.addButton("Remplacer", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(add)
+        box.exec()
+        clicked = box.clickedButton()
+        return "add" if clicked is add else "replace" if clicked is replace else "cancel"
 
     # ------------------------------------------------------------------ oscilloscope
     def _on_scope_opened(self, cfg: LoggerConfig):

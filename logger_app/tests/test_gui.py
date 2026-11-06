@@ -739,6 +739,13 @@ def _open_scope(qapp, ctrl, paths):
     assert ctrl.scope_ctrl.wait_import()
     assert wait(qapp, lambda: ctrl.scope_ctrl.active and ctrl.graph_ctrl.frame is not None)
     wait(qapp, lambda: False, 0.2)
+    _no_progress_dialog(ctrl)
+
+
+def _no_progress_dialog(ctrl):
+    from controller.scope_controller import ProgressDialog
+    assert ctrl.scope_ctrl.progress_dialog is None
+    assert not [d for d in ctrl.view.findChildren(ProgressDialog) if d.isVisible()]
 
 
 def test_scope_record_mode(setup, tmp_path):
@@ -803,8 +810,9 @@ def _peak(fft):
                                min_frequency=fft.freq[1])[0].frequency
 
 
-def test_scope_reuse_h5_and_back_to_logger(setup, tmp_path):
+def test_scope_reuse_h5_and_back_to_logger(setup, tmp_path, monkeypatch):
     qapp, sim, window, ctrl = setup
+    monkeypatch.setattr(ctrl, "_ask_add_or_replace", lambda paths: "replace")
     path, *_ = _tek_csv(tmp_path / "dpo.csv", n=20_000)
     _open_scope(qapp, ctrl, [path])
     ctrl.scope_ctrl.close()
@@ -838,3 +846,101 @@ def test_scope_invalid_files(setup, tmp_path, monkeypatch):
     logger_csv.write_text("trame,temps_s,V\n1,0,2\n")
     assert not ctrl.open_files([a, str(logger_csv)])               # mélange refusé
     assert "Plusieurs fichiers" in shown[-1]
+
+
+def _tek_channel(path, values, dt=1e-6, t0=-0.01):
+    """CSV Tektronix d'une seule voie (un fichier par voie, comme le DPO7054)."""
+    n = len(values)
+    t = t0 + np.arange(n) * dt
+    meta = [('"Record Length"', f"{n}", '"Points"'), ('"Sample Interval"', f"{dt:.8e}", "s")]
+    with open(path, "w") as f:
+        for i in range(n):
+            m = meta[i] if i < len(meta) else ("", "", "")
+            f.write(f"{m[0]},{m[1]},{m[2]},{t[i]:.8e},{values[i]:.8e}\n")
+    return str(path)
+
+
+def test_scope_one_csv_per_channel(setup, tmp_path, monkeypatch):
+    qapp, sim, window, ctrl = setup
+    scope = ctrl.scope_ctrl
+    n = 40_000
+    k = np.arange(n)
+    ch1 = _tek_channel(tmp_path / "tek0000CH1.csv", np.sin(k / 300))
+    ch2 = _tek_channel(tmp_path / "tek0000CH2.csv", np.cos(k / 300))
+    ch3 = _tek_channel(tmp_path / "tek0000CH3.csv", k / n)
+    ch4 = _tek_channel(tmp_path / "tek0000CH4.csv", -k / n)
+
+    # plusieurs fichiers choisis ensemble (Ctrl+clic)
+    _open_scope(qapp, ctrl, [ch1, ch2])
+    assert scope.record.names == ["CH1", "CH2"]
+
+    # cumul : nouveaux fichiers ouverts sur l'enregistrement affiché -> « Ajouter »
+    plot = ctrl.graph_ctrl.analog_plot
+    plot.setXRange(-0.01 + 10_000e-6, -0.01 + 12_000e-6, padding=0)
+    wait(qapp, lambda: False, 0.2)
+    view = plot.vb.viewRange()[0]
+    asked = []
+    monkeypatch.setattr(ctrl, "_ask_add_or_replace", lambda paths: asked.append(paths) or "add")
+    assert ctrl.open_files([ch3])
+    assert scope.wait_import()
+    assert wait(qapp, lambda: scope.active and scope.record.names == ["CH1", "CH2", "CH3"])
+    wait(qapp, lambda: False, 0.2)
+    assert asked == [[ch3]]
+    assert plot.vb.viewRange()[0] == pytest.approx(view, abs=1e-9)   # même portion
+    assert ("A", 2) in ctrl.tree_ctrl.items
+    assert ctrl.tree_ctrl.items[("A", 2)][0].text() == "CH3"
+    frame = ctrl.graph_ctrl.frame
+    i0 = int(round((frame.t0 + 0.01) / 1e-6))
+    np.testing.assert_allclose(frame.analog[:, 2], (k / n)[i0:i0 + frame.n_samples], atol=1e-6)
+    assert "CH3" in window.statusBar().currentMessage()
+
+    # menu « Ajouter des voies à l'enregistrement... »
+    assert window.actionAddScopeChannels.isEnabled()
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileNames", lambda *a, **k: ([ch4], ""))
+    window.actionAddScopeChannels.trigger()
+    assert scope.wait_import()
+    assert wait(qapp, lambda: scope.active and len(scope.record.names) == 4)
+    assert scope.record.names[-1] == "CH4"
+    wait(qapp, lambda: False, 0.1)
+    _no_progress_dialog(ctrl)
+    window.grab().save(str(SHOTS / "logger_scope_4_voies.png"))
+
+    # « Remplacer » : nouvel enregistrement
+    monkeypatch.setattr(ctrl, "_ask_add_or_replace", lambda paths: "replace")
+    _open_scope(qapp, ctrl, [ch3])
+    assert scope.record.names == ["CH1"]                   # fichier seul : CH1
+
+
+def test_scope_add_refused_keeps_record(setup, tmp_path, monkeypatch):
+    qapp, sim, window, ctrl = setup
+    scope = ctrl.scope_ctrl
+    shown = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a: shown.append(a[2]))
+    ch1 = _tek_channel(tmp_path / "tek0000CH1.csv", np.zeros(20_000))
+    other = _tek_channel(tmp_path / "autre_CH2.csv", np.ones(15_000))   # autre acquisition
+    _open_scope(qapp, ctrl, [ch1])
+    monkeypatch.setattr(ctrl, "_ask_add_or_replace", lambda paths: "add")
+    assert ctrl.open_files([other])
+    assert scope.wait_import()
+    assert wait(qapp, lambda: shown and scope.active)
+    assert "points" in shown[-1]
+    assert scope.record.names == ["CH1"]                   # enregistrement rouvert, intact
+    # « Annuler » : rien ne change
+    monkeypatch.setattr(ctrl, "_ask_add_or_replace", lambda paths: "cancel")
+    assert not ctrl.open_files([other])
+    assert scope.record.names == ["CH1"]
+
+
+def test_progress_dialog_cancel(setup, tmp_path):
+    """Annuler (bouton ou Échap) pendant la conversion : rien n'est ouvert."""
+    qapp, sim, window, ctrl = setup
+    scope = ctrl.scope_ctrl
+    path = _tek_channel(tmp_path / "long.csv", np.zeros(300_000))
+    assert ctrl.open_files([path])
+    dialog = scope.progress_dialog
+    assert dialog is not None and dialog.isVisible()
+    dialog.reject()                                         # Échap
+    assert scope.wait_import()
+    assert wait(qapp, lambda: scope.progress_dialog is None)
+    assert not scope.active and not (tmp_path / "long.h5").exists()
+    assert "annulée" in window.statusBar().currentMessage()

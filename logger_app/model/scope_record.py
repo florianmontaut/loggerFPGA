@@ -37,6 +37,7 @@ import json
 import math
 import os
 import re
+import shutil
 import warnings
 from dataclasses import dataclass, field
 from typing import Callable
@@ -149,18 +150,22 @@ def read_tek_header(path: str, max_lines: int = 100) -> TekHeader:
     return TekHeader(path, metadata, n_cols - 4, first_time, extra)
 
 
-def default_names(paths: list[str], headers: list[TekHeader]) -> list[str]:
-    """Noms des voies : CH1, CH2... ; plusieurs fichiers : CHn du nom de fichier ou nom."""
+def default_names(paths: list[str], headers: list[TekHeader],
+                  by_file: bool = False) -> list[str]:
+    """
+    Noms des voies, fichier par fichier :
+        1. lignes de métadonnées supplémentaires, une par voie (règle de csv_to_hdf5.py) ;
+        2. plusieurs fichiers (ou ajout à un enregistrement : by_file) : CHn du nom de
+           fichier, sinon le nom du fichier (tek0000CH2.csv -> CH2) ;
+        3. un seul fichier : CH1, CH2... dans l'ordre des colonnes.
+    """
     names = []
-    if len(paths) == 1:
-        header = headers[0]
-        # lignes de métadonnées supplémentaires : une par voie, dans l'ordre des colonnes
-        if len(header.extra_keys) == header.n_signals:
-            names = list(header.extra_keys)
+    for path, header in zip(paths, headers):
+        if header.extra_keys and len(header.extra_keys) == header.n_signals:
+            names += list(header.extra_keys)
+        elif len(paths) == 1 and not by_file:
+            names += [f"CH{k + 1}" for k in range(header.n_signals)]
         else:
-            names = [f"CH{k + 1}" for k in range(header.n_signals)]
-    else:
-        for path, header in zip(paths, headers):
             stem = os.path.splitext(os.path.basename(path))[0]
             match = re.search(r"(CH\d+|MATH\d+|REF\d+)", stem, re.IGNORECASE)
             base = match.group(1).upper() if match else stem
@@ -243,6 +248,135 @@ def import_tek_csv(paths: list[str], h5_path: str, names: list[str] | None = Non
             os.remove(tmp_path)
         raise
     return h5_path
+
+
+def _unique(name: str, used: set) -> str:
+    candidate, k = name, 1
+    while candidate in used:
+        k += 1
+        candidate = f"{name}_{k}"
+    used.add(candidate)
+    return candidate
+
+
+def append_to_workspace(h5_path: str, sources: list[str],
+                        progress: Callable[[float, str], None] | None = None,
+                        cancelled: Callable[[], bool] | None = None,
+                        chunk_rows: int = CSV_CHUNK_ROWS, dtype=np.float32) -> list[str]:
+    """
+    Ajoute à un workspace HDF5 les voies de CSV Tektronix ou d'autres workspaces .h5
+    (un oscilloscope Tektronix écrit un CSV par voie). Les voies ajoutées doivent avoir le
+    même intervalle d'échantillonnage, le même nombre de points et commencer au même
+    instant. Un nom déjà pris reçoit un suffixe (_2...).
+
+    L'ajout se fait dans une copie, qui remplace le fichier seulement en cas de succès :
+    annulation, erreur ou coupure laissent le workspace intact. Renvoie les noms ajoutés.
+    """
+    _require_h5py()
+    h5_path = os.path.abspath(h5_path)
+    sources = [os.path.abspath(p) for p in sources]
+    report = progress or (lambda f, t: None)
+    stop = cancelled or (lambda: False)
+    csvs = [p for p in sources if os.path.splitext(p)[1].lower() == ".csv"]
+    others = [p for p in sources if p not in csvs]
+    for path in csvs:
+        if not is_tek_csv(path):
+            raise ScopeError(f"{os.path.basename(path)} : format Tektronix non reconnu")
+    if os.path.abspath(h5_path) in others:
+        raise ScopeError("Un enregistrement ne peut pas être ajouté à lui-même")
+
+    tmp_path = h5_path + ".partiel"
+    report(0.0, "Copie de l'enregistrement")
+    shutil.copyfile(h5_path, tmp_path)
+    added = []
+    try:
+        with h5py.File(tmp_path, "a") as h5:
+            signals = h5["signals"]
+            dt = float(h5.attrs.get("sample_interval", 0.0) or 0.0)
+            if dt <= 0:
+                raise ScopeError("Intervalle d'échantillonnage absent de l'enregistrement")
+            present = [n for n in signals if "raw" in signals[n] and "value" in signals[n]["raw"]]
+            length = min(signals[n]["raw/value"].shape[0] for n in present)
+            t0 = float(h5.attrs["time_origin"]) if "time_origin" in h5.attrs else None
+            used = set(signals)
+
+            # CSV Tektronix
+            headers = [read_tek_header(p) for p in csvs]
+            names = default_names(csvs, headers, by_file=True) if csvs else []
+            sizes = [os.path.getsize(p) for p in csvs]
+            total = float(sum(sizes)) or 1.0
+            done, column = 0.0, 0
+            for path, header, size in zip(csvs, headers, sizes):
+                label = os.path.basename(path)
+                file_dt = header.value("sample_interval")
+                if isinstance(file_dt, (int, float)) and abs(file_dt - dt) > 1e-9 * dt:
+                    raise ScopeError(f"{label} : échantillonnage {file_dt} s, {dt} s attendu")
+                if t0 is not None and abs(header.first_time - t0) > dt:
+                    raise ScopeError(f"{label} commence à {header.first_time} s, {t0} s "
+                                     f"attendu (même acquisition que l'enregistrement)")
+                own = [_unique(n, used) for n in names[column:column + header.n_signals]]
+                column += header.n_signals
+                n, _ = _import_file(path, header, own, signals, length, dtype, chunk_rows,
+                                    lambda f: report((done + f * size) / total * 0.8,
+                                                     f"Lecture de {label}"), stop)
+                if n != length:
+                    raise ScopeError(f"{label} : {n} points, {length} attendus (même "
+                                     f"acquisition que l'enregistrement)")
+                added += own
+                done += size
+
+            # autres workspaces HDF5 : voies copiées avec leur pyramide
+            for path in others:
+                label = os.path.basename(path)
+                try:
+                    source = h5py.File(path, "r")
+                except OSError as exc:
+                    raise ScopeError(f"{label} : HDF5 illisible ({exc})") from None
+                with source:
+                    if "signals" not in source:
+                        raise ScopeError(f"{label} : pas un workspace d'oscilloscope")
+                    src_dt = float(source.attrs.get("sample_interval", 0.0) or 0.0)
+                    if abs(src_dt - dt) > 1e-9 * dt:
+                        raise ScopeError(f"{label} : échantillonnage {src_dt} s, {dt} s attendu")
+                    if t0 is not None and "time_origin" in source.attrs and \
+                            abs(float(source.attrs["time_origin"]) - t0) > dt:
+                        raise ScopeError(f"{label} : ne commence pas au même instant")
+                    for name in source["signals"]:
+                        group = source[f"signals/{name}"]
+                        if "raw/value" not in group:
+                            continue
+                        if group["raw/value"].shape[0] != length:
+                            raise ScopeError(f"{label}, {name} : {group['raw/value'].shape[0]} "
+                                             f"points, {length} attendus")
+                        if stop():
+                            raise ImportCancelled()
+                        new = _unique(name, used)
+                        source.copy(group, signals, name=new)
+                        signals[new].attrs["name"] = new
+                        signals[new].attrs["source_file"] = label
+                        added.append(new)
+
+            # rang d'affichage après les voies existantes ; pyramides des voies des CSV
+            for k, name in enumerate(added):
+                signals[name].attrs["index"] = len(present) + k
+            csv_names = [n for n in added if "overview" not in signals[n]
+                         or "min" not in signals[n]["overview"]]
+            for k, name in enumerate(csv_names):
+                report(0.8 + 0.2 * k / max(len(csv_names), 1), f"Pyramide de {name}")
+                if stop():
+                    raise ImportCancelled()
+                _overview(signals[name])
+                _pyramid(signals[name], stop)
+            files = json.loads(h5.attrs.get("source_files", "[]"))
+            h5.attrs["source_files"] = json.dumps(files + [os.path.basename(p) for p in sources])
+            h5.attrs["signal_count"] = len(present) + len(added)
+            report(1.0, "Terminé")
+        os.replace(tmp_path, h5_path)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+    return added
 
 
 def _write_attrs(h5, headers: list[TekHeader], paths: list[str]):
