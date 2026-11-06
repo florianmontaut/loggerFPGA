@@ -124,6 +124,8 @@ class BufferController(QtCore.QObject):
         saved = FrameBuffer.is_saved(frame)
         item.setText(f"Trame {frame.index}{'  ✓' if saved else ''}\n{_clock(frame.timestamp)}")
         tip = f"Trame {frame.index} — {_clock(frame.timestamp)}"
+        if frame.meta.get("loaded"):
+            tip += f"\nRelue depuis : {frame.meta['loaded']}"
         if saved:
             tip += f"\nEnregistrée : {frame.meta['saved']}" if isinstance(
                 frame.meta["saved"], str) else "\nEnregistrée"
@@ -190,6 +192,23 @@ class BufferController(QtCore.QObject):
             self.display_frame.emit(self.buffer.latest, "resume")
         self.list.scrollToBottom()
         self._update_label()
+
+    # ------------------------------------------------------------------ fichier relu
+    def load(self, frames: list[Frame], cfg: LoggerConfig):
+        """
+        Remplace la mémoire tampon par des trames relues d'un fichier (déjà enregistrées)
+        et affiche la première.
+        """
+        self.clear()
+        self.cfg = cfg.copy()
+        self.list.setUpdatesEnabled(False)
+        try:
+            for frame in frames:
+                self._remove_rows(self.buffer.add(frame, cfg))
+                self.list.addItem(self._make_item(frame))
+        finally:
+            self.list.setUpdatesEnabled(True)
+        self.review(0)
 
     # ------------------------------------------------------------------ taille
     def set_capacity(self, capacity: int):
@@ -282,6 +301,9 @@ class BufferController(QtCore.QObject):
         unsaved = len(self.buffer.unsaved())
         if unsaved:
             text += f" — {unsaved} non enregistrée(s)"
+        source = self.reviewing.meta.get("loaded") if self.reviewing is not None else None
+        if source:
+            text += f"\nFichier : {os.path.basename(source)}"
         if self.reviewing is not None:
             position = self.buffer.position(self.reviewing)
             where = (f"{position + 1}/{n}" if position >= 0

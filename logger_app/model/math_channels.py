@@ -328,7 +328,10 @@ class MathEngine:
         if cached is not None and cached[0] == self.version:
             return cached[1], cached[2]
         results, errors = {}, {}
-        if self.cfg is not None and list(frame.signals) == list(self.cfg.signals):
+        if frame.meta.get("envelope"):
+            # enveloppe min/max d'un enregistrement long : formules non applicables
+            errors = {item.name: "zoomer jusqu'aux données brutes" for item in self.active}
+        elif self.cfg is not None and list(frame.signals) == list(self.cfg.signals):
             values = self.inputs(frame)
             for item in self.active:
                 try:

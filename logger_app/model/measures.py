@@ -13,9 +13,9 @@ from dataclasses import dataclass
 import numpy as np
 
 
-def nearest_index(t: float, sample_rate: float, n_samples: int) -> int:
-    """Échantillon le plus proche de l'instant t (axe des temps commençant à 0)."""
-    return int(min(max(round(t * sample_rate), 0), n_samples - 1))
+def nearest_index(t: float, sample_rate: float, n_samples: int, t0: float = 0.0) -> int:
+    """Échantillon le plus proche de l'instant t (premier échantillon à l'instant t0)."""
+    return int(min(max(round((t - t0) * sample_rate), 0), n_samples - 1))
 
 
 @dataclass
@@ -48,7 +48,8 @@ class SegmentMeasures:
         return None if self.dt == 0 else self.dy / self.dt
 
 
-def segment(y: np.ndarray, sample_rate: float, t1: float, t2: float) -> SegmentMeasures:
+def segment(y: np.ndarray, sample_rate: float, t1: float, t2: float,
+            t0: float = 0.0) -> SegmentMeasures:
     """
     Mesures sur la voie `y` entre les curseurs t1 et t2 (dans n'importe quel ordre :
     Δt et Δy restent signés, t2 - t1 et y(t2) - y(t1)).
@@ -56,22 +57,23 @@ def segment(y: np.ndarray, sample_rate: float, t1: float, t2: float) -> SegmentM
     y = np.asarray(y, dtype=float)
     if y.size == 0:
         raise ValueError("Voie vide")
-    i1 = nearest_index(t1, sample_rate, y.size)
-    i2 = nearest_index(t2, sample_rate, y.size)
+    i1 = nearest_index(t1, sample_rate, y.size, t0)
+    i2 = nearest_index(t2, sample_rate, y.size, t0)
     lo, hi = min(i1, i2), max(i1, i2)
     part = y[lo:hi + 1]
-    return SegmentMeasures(t1=i1 / sample_rate, t2=i2 / sample_rate,
+    return SegmentMeasures(t1=t0 + i1 / sample_rate, t2=t0 + i2 / sample_rate,
                            y1=float(y[i1]), y2=float(y[i2]), n=int(part.size),
                            minimum=float(part.min()), maximum=float(part.max()),
                            mean=float(part.mean()), rms=float(np.sqrt(np.mean(part ** 2))))
 
 
-def deltas(columns: np.ndarray, sample_rate: float, t1: float, t2: float) -> np.ndarray:
+def deltas(columns: np.ndarray, sample_rate: float, t1: float, t2: float,
+           t0: float = 0.0) -> np.ndarray:
     """y(t2) - y(t1) pour chaque colonne d'un tableau (n, voies)."""
     columns = np.asarray(columns)
     n = columns.shape[0]
-    i1 = nearest_index(t1, sample_rate, n)
-    i2 = nearest_index(t2, sample_rate, n)
+    i1 = nearest_index(t1, sample_rate, n, t0)
+    i2 = nearest_index(t2, sample_rate, n, t0)
     return columns[i2].astype(float) - columns[i1].astype(float)
 
 

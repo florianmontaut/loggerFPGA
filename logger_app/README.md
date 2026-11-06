@@ -81,6 +81,8 @@ logger_app/
 │   ├── frame_buffer.py            mémoire tampon des dernières trames
 │   ├── formula/                   moteur de formules du GLviewer (copie, voir son __init__)
 │   ├── math_channels.py           voies calculées : fonctions temps réel, unités, évaluation
+│   ├── loader.py                  relecture d'un enregistrement (.csv, .npz)
+│   ├── scope_record.py            oscilloscope : import CSV Tektronix -> HDF5, lecture par zoom
 │   ├── spectrum.py                FFT : fenêtres, amplitudes calibrées, moyennage, pics, THD
 │   └── measures.py                mesures entre deux curseurs (Δt, Δy, min, max, moyenne, efficace)
 ├── controller/
@@ -90,6 +92,7 @@ logger_app/
 │   ├── channel_tree_controller.py arborescence des voies (visibilité, valeur sous le curseur)
 │   ├── graph_controller.py        graphique temps réel (analogique + logique, seuil, curseur)
 │   ├── fft_controller.py          spectre temps réel et réglages FFT
+│   ├── scope_controller.py        mode enregistrement long (vue d'ensemble, zoom, import)
 │   ├── math_controller.py         groupe « Voies calculées » (formules, état)
 │   ├── buffer_controller.py       onglet Trames : mémoire tampon, relecture, sauvegarde, confirmations
 │   ├── cursor_controller.py       curseurs de mesure (t1/t2, y1/y2) et mesures associées
@@ -223,6 +226,88 @@ trame,temps_s,I_HV (V),V_PH1_INV2 (V),K_HV,K_PRE,L2,...
 
 Les trames enregistrées par ce bouton sont marquées ✓ dans la mémoire tampon : elles ne
 sont pas proposées à nouveau avant de quitter.
+
+### Relire un enregistrement
+
+*Fichier › Ouvrir un enregistrement...* (Ctrl+Maj+O, ou bouton de l'onglet Trames)
+recharge les trames d'un fichier écrit par le logger dans la mémoire tampon. Elles se
+relisent alors comme des trames capturées : vignettes, navigation Alt+←/→, graphiques,
+FFT, curseurs, voies calculées. Le titre du graphique et l'onglet Trames indiquent le
+fichier d'origine.
+
+* **Formats** : CSV avec colonne `trame` (format actuel), npz, et CSV de l'ancien format
+  (un fichier par trame, colonne `time_s`).
+* **Configuration** : voies, noms, gains, unités et diviseur sont lus dans le `.json`
+  écrit à côté du fichier. Sans lui, ils sont reconstitués depuis l'en-tête du CSV : les
+  voies sont alors renumérotées 0, 1, 2… et l'heure de capture est inconnue.
+* **Affichage** : graphiques et arborescence prennent la configuration du fichier.
+  L'arbre des paramètres garde celle de l'acquisition, qui n'est pas modifiée par
+  l'ouverture d'un fichier.
+* **Mémoire tampon** : le fichier la remplace. Si elle contient des trames non
+  enregistrées, l'application propose de les enregistrer d'abord (question posée
+  seulement si le fichier est lisible). Elle est agrandie si le fichier contient plus de
+  trames que *Trames gardées* (5 000 au plus).
+* **Trames relues** : elles sont marquées ✓ (déjà sur disque) et ne sont pas proposées
+  à l'enregistrement en quittant. L'acquisition suivante numérote ses trames après
+  celles du fichier.
+* **Pendant une acquisition**, l'ouverture est refusée : il faut d'abord l'arrêter (F7).
+
+Lecture : environ 0,5 s pour 64 trames (21 Mo de CSV).
+
+![relecture d'un enregistrement](docs/capture_relecture.png)
+
+### Enregistrements longs d'oscilloscope (Tektronix)
+
+Le même outil sert à parcourir les enregistrements d'oscilloscope (DPO7054…), qui font
+plusieurs millions de points par voie. *Fichier › Ouvrir un enregistrement...* reconnaît
+le type de fichier :
+
+| Fichier | Effet |
+|---|---|
+| CSV du logger (`trame,temps_s,...`), npz | relecture dans la mémoire tampon (section précédente) |
+| CSV Tektronix (un ou plusieurs) | conversion en HDF5, puis mode enregistrement long |
+| `.h5` (logger ou `csv_to_hdf5.py` de HDF5_viewer) | mode enregistrement long |
+
+**Format CSV Tektronix.** Les données commencent dès la ligne 0 : colonnes 0 à 2 pour
+les métadonnées des premières lignes (`Record Length`, `Sample Interval`, `Trigger
+Point`, `Trigger Time`, `Horizontal Offset`), colonne 3 pour le temps, colonnes 4, 5…
+pour les signaux. Noms des voies (même règle que `csv_to_hdf5.py`) : les lignes de
+métadonnées supplémentaires, une par voie dans l'ordre des colonnes, sinon CH1, CH2….
+Plusieurs fichiers d'une voie chacun (mêmes instants) sont réunis, avec le nom du fichier
+ou le `CHn` qu'il contient (`tek0000CH2.csv` → CH2).
+
+**Conversion en HDF5.** Elle a lieu une seule fois, en arrière-plan, avec une barre de
+progression annulable. Le `.h5` est écrit à côté du CSV et réutilisé tant qu'il est plus
+récent que lui. Sa structure est celle de HDF5_viewer (`/signals/<voie>/raw/value`,
+`overview`, `pyramid/level_XX` min/max) : les deux outils lisent les fichiers l'un de
+l'autre (vérifié dans les deux sens). Lecture du CSV par blocs avec numpy, sans pandas :
+environ 4 s pour 5 millions de points sur 2 voies, soit une vingtaine de secondes pour
+25 M. Le HDF5 est environ 3 fois plus petit que le CSV.
+
+**Navigation.**
+* Une **vue d'ensemble** de tout l'enregistrement s'affiche au-dessus des graphiques.
+  Sa zone bleue correspond à la portion affichée : on peut la déplacer ou l'élargir, et
+  elle suit aussi les zooms faits sur le graphique.
+* À chaque zoom ou déplacement, la portion visible est relue dans le HDF5 (1 à 20 ms) :
+  * **jusqu'à 2 millions de points par voie : données brutes**. Curseurs et *Mesures*,
+    FFT, voies calculées et valeurs de l'arborescence fonctionnent comme sur une trame du
+    logger, avec les temps réels de l'enregistrement ;
+  * **au-delà : enveloppe min/max** tirée de la pyramide. Les pics isolés restent
+    visibles, mais FFT, voies calculées et *Mesures* sont suspendues, avec le message
+    « zoomer jusqu'aux données brutes ».
+* Le titre du graphique indique le fichier et le nombre de points affichés.
+* Temps de réaction mesurés, relecture, calculs et dessin compris (FFT et une voie
+  calculée actives) : 0,15 à 0,2 s jusqu'à 200 000 points, environ 0,9 s à 2 millions de
+  points bruts.
+
+**Retour au logger.** *Fichier › Fermer l'enregistrement d'oscilloscope*, *Démarrer*, ou
+un clic sur une trame de l'onglet Trames : l'affichage revient à la configuration du
+logger. La mémoire tampon n'est pas touchée par l'ouverture d'un enregistrement
+d'oscilloscope.
+
+Dépendance : `h5py`.
+
+![enregistrement d'oscilloscope](docs/capture_oscilloscope.png)
 
 ### Voies calculées (MATH)
 
@@ -398,7 +483,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-165 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, acquisition complète contre le
+188 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes

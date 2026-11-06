@@ -29,7 +29,10 @@ from controller.detach_controller import DetachController
 from controller.fft_controller import FFTController
 from controller.graph_controller import LiveGraphController
 from controller.math_controller import MathController
+from controller.scope_controller import ScopeController, is_scope_file
 from model.config import ConfigError, LoggerConfig
+from model.frame_buffer import MAX_CAPACITY
+from model.loader import RecordingError, load_recording
 from model.math_channels import definitions_from_config
 from view.main_window import MainWindow
 
@@ -104,6 +107,8 @@ class MainController(QtCore.QObject):
                                             self._record_settings)
         if confirm_quit:
             view.close_guard = self.buffer_ctrl.confirm_quit
+        # enregistrements longs d'oscilloscope (CSV Tektronix, HDF5)
+        self.scope_ctrl = ScopeController(view, self.graph_ctrl)
 
         self._connect()
         self._apply_preview(self.config_ctrl.cfg)
@@ -136,6 +141,12 @@ class MainController(QtCore.QObject):
         v.actionNextFrame.triggered.connect(lambda: self.buffer_ctrl.next())
         v.actionLiveFrame.triggered.connect(lambda: self.buffer_ctrl.go_live())
         v.actionSaveBuffer.triggered.connect(lambda: self.buffer_ctrl.save_dialog())
+        v.actionOpenRecording.triggered.connect(self.open_recording_dialog)
+        v.actionCloseScope.triggered.connect(lambda: self.scope_ctrl.close())
+        self.scope_ctrl.opened.connect(self._on_scope_opened)
+        self.scope_ctrl.closed.connect(self._on_scope_closed)
+        self.scope_ctrl.display_frame.connect(lambda frame: self._display_frame(frame, "scope"))
+        self.scope_ctrl.message.connect(v.show_message)
         self.acq_ctrl.status.connect(v.show_message)
         self.acq_ctrl.error.connect(lambda msg: v.show_message(f"⚠ {msg}", 8000))
         self.acq_ctrl.state_changed.connect(
@@ -173,6 +184,8 @@ class MainController(QtCore.QObject):
 
     # ------------------------------------------------------------------ acquisition
     def start(self, single: bool = False):
+        if self.scope_ctrl.active:
+            self.scope_ctrl.close()
         try:
             cfg = self.config_ctrl.to_config()
         except ConfigError as exc:
@@ -189,6 +202,14 @@ class MainController(QtCore.QObject):
         Trame à afficher : flux direct (respecte Figer et le moyennage FFT) ou trame de la
         mémoire tampon (relecture, retour au direct).
         """
+        if mode == "scope":                 # portion d'un enregistrement d'oscilloscope
+            self.graph_ctrl.show_frame(frame)
+            self.fft_ctrl.show_frame(frame)
+            return
+        if self.scope_ctrl.active:
+            # trame du logger demandée (direct, mémoire tampon) : fin du mode oscilloscope
+            self.scope_ctrl.close(emit=False)
+            self._apply_preview(self.buffer_ctrl.buffer.cfg or self.config_ctrl.cfg, force=True)
         if mode == "live":
             self.graph_ctrl.on_frame(frame)
             self.fft_ctrl.on_frame(frame)
@@ -198,8 +219,101 @@ class MainController(QtCore.QObject):
             # configuration modifiée depuis : affichage remis à celle de la trame
             self._apply_preview(buffer_cfg, force=True)
         suffix = "  —  mémoire tampon" if mode == "review" else ""
+        if frame.meta.get("loaded"):
+            suffix = f"  —  {os.path.basename(frame.meta['loaded'])}"
         self.graph_ctrl.show_frame(frame, suffix)
         self.fft_ctrl.show_frame(frame)
+
+    # ------------------------------------------------------------------ relecture d'un fichier
+    def open_recording_dialog(self):
+        if self.acq_ctrl.running:
+            QtWidgets.QMessageBox.information(
+                self.view, "Ouvrir un enregistrement",
+                "Arrêtez l'acquisition (F7) avant d'ouvrir un enregistrement.")
+            return
+        directory = self._record_settings()[0]
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self.view, "Ouvrir un enregistrement", directory,
+            "Enregistrements (*.csv *.npz *.h5 *.hdf5);;Logger FPGA (*.csv *.npz);;"
+            "Oscilloscope : CSV Tektronix, HDF5 (*.csv *.h5 *.hdf5);;Tous les fichiers (*)")
+        if paths:
+            self.open_files(paths)
+
+    def open_files(self, paths: list[str]) -> bool:
+        """
+        Aiguillage : enregistrement du logger (un fichier .csv / .npz -> mémoire tampon) ou
+        enregistrement long d'oscilloscope (CSV Tektronix, plusieurs possibles, ou .h5).
+        """
+        if self.acq_ctrl.running:
+            return False
+        scope = [is_scope_file(p) for p in paths]
+        if all(scope):
+            return self.scope_ctrl.open(paths)
+        if len(paths) == 1:
+            return self.open_recording(paths[0])
+        QtWidgets.QMessageBox.warning(
+            self.view, "Ouvrir un enregistrement",
+            "Plusieurs fichiers : seulement des CSV d'oscilloscope (une voie par fichier).")
+        return False
+
+    # ------------------------------------------------------------------ oscilloscope
+    def _on_scope_opened(self, cfg: LoggerConfig):
+        """Affichage configuré pour l'enregistrement (la mémoire tampon est conservée)."""
+        self.buffer_ctrl.go_live(show=False)
+        self.view.actionPause.setChecked(False)
+        self._apply_preview(cfg, force=True)
+
+    def _on_scope_closed(self):
+        """Retour à l'affichage du logger (configuration de l'arbre, mémoire tampon)."""
+        try:
+            cfg = self.config_ctrl.read_tree()
+        except ConfigError:
+            cfg = self.config_ctrl.cfg
+        self._apply_preview(cfg, force=True)
+        latest = self.buffer_ctrl.buffer.latest
+        if latest is not None:
+            self._display_frame(latest, "resume")
+
+    def open_recording(self, path: str) -> bool:
+        """Trames d'un enregistrement chargées dans la mémoire tampon, en relecture."""
+        if self.acq_ctrl.running:
+            return False
+        if self.scope_ctrl.active:
+            self.scope_ctrl.close(emit=False)
+        # fichier lu d'abord : on ne propose d'abandonner la mémoire tampon que si le
+        # fichier est valide
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            recording = load_recording(path)
+        except RecordingError as exc:
+            QtWidgets.QMessageBox.warning(self.view, "Enregistrement illisible", str(exc))
+            return False
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if not self.buffer_ctrl.confirm_unsaved("ouvrir un enregistrement (la mémoire "
+                                                "tampon sera remplacée)"):
+            return False
+        frames = recording.frames
+        notes = list(recording.notes)
+        if len(frames) > MAX_CAPACITY:
+            notes.append(f"{len(frames)} trames : seules les {MAX_CAPACITY} dernières sont "
+                         f"chargées (taille maximale de la mémoire tampon)")
+            frames = frames[-MAX_CAPACITY:]
+        if len(frames) > self.buffer_ctrl.buffer.capacity:
+            # mémoire tampon agrandie pour contenir tout le fichier
+            self.buffer_ctrl.set_capacity(len(frames))
+            self.config_ctrl.p("Mémoire tampon", "Trames gardées").setValue(len(frames))
+            notes.append(f"mémoire tampon portée à {len(frames)} trames")
+        self.buffer_ctrl.load(frames, recording.cfg)
+        # numéros des prochaines trames acquises : après ceux du fichier
+        self.acq_ctrl.next_index = max(self.acq_ctrl.next_index,
+                                       max(f.index for f in frames) + 1)
+        self.view.tree_tabs.setCurrentIndex(1)              # onglet Trames
+        message = f"{len(frames)} trame(s) relue(s) depuis {os.path.basename(path)}"
+        if notes:
+            message += " — " + " ; ".join(notes)
+        self.view.show_message(message, 12000)
+        return True
 
     def _on_math_changed(self):
         """Voies calculées modifiées : courbes, arborescence et curseurs mis à jour."""
@@ -210,6 +324,8 @@ class MainController(QtCore.QObject):
 
     def _on_config_changed(self, cfg: LoggerConfig):
         self.buffer_ctrl.set_capacity(cfg.buffer_frames)
+        if self.scope_ctrl.active:
+            return                  # affichage de l'enregistrement conservé
         self._apply_preview(cfg)
         if self.acq_ctrl.running:
             self.view.show_message("Configuration modifiée : appliquée au prochain démarrage "
@@ -303,6 +419,8 @@ class MainController(QtCore.QObject):
             self.load_config(path)
 
     def load_config(self, path: str):
+        if self.scope_ctrl.active:
+            self.scope_ctrl.close()
         try:
             cfg = LoggerConfig.load(path)
         except (OSError, ValueError, TypeError) as exc:
@@ -336,6 +454,7 @@ class MainController(QtCore.QObject):
 
     def quit(self):
         self.acq_ctrl.shutdown()
+        self.scope_ctrl.close(emit=False)
         self.detach_ctrl.shutdown()
         if self.remember:
             try:

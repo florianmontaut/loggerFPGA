@@ -249,12 +249,28 @@ class FFTController(QtCore.QObject):
         self.frame = frame
         self._compute(frame)
 
+    def _resolution_source(self) -> tuple[float, int]:
+        """(fréquence d'échantillonnage, points) du spectre : trame affichée, sinon config."""
+        frame = self.frame
+        if frame is not None and not frame.meta.get("envelope") and frame.n_samples > 1:
+            return frame.sample_rate, frame.n_samples
+        return self.cfg.sample_rate, self.cfg.samples_per_channel
+
     def show_frame(self, frame: Frame):
         """Spectre d'une trame donnée (mémoire tampon) : moyenne recommencée."""
         self.frame = frame
         if not self.enabled or not frame.analog_signals:
             return
         self._reset_average()
+        if frame.meta.get("envelope"):
+            # enveloppe min/max d'un enregistrement long : pas un signal échantillonné
+            self.amp = None
+            for curve in self.curves.values():
+                curve.setData([], [])
+            self._clear_peaks()
+            self.plot.setTitle("Spectre — zoomer jusqu'aux données brutes pour le calculer")
+            return
+        self.plot.setTitle("Spectre")
         self._compute(frame)
 
     def _compute(self, frame: Frame):
@@ -293,9 +309,10 @@ class FFTController(QtCore.QObject):
     def _apply_x_range(self):
         if self.cfg is None:
             return
-        f_max = self.p("Fréquence max (Hz)").value() or self.cfg.sample_rate / 2
+        fs, points = self._resolution_source()
+        f_max = self.p("Fréquence max (Hz)").value() or fs / 2
         if self.log_x:
-            df = self.cfg.sample_rate / self.cfg.samples_per_channel
+            df = fs / points
             self.plot.setXRange(np.log10(df), np.log10(f_max), padding=0)
         else:
             self.plot.setXRange(0, f_max, padding=0)
@@ -321,7 +338,8 @@ class FFTController(QtCore.QObject):
         label = {"crête": "Amplitude crête", "efficace": "Amplitude efficace",
                  "dB": f"dB (réf. 1 {unit or 'unité'} crête)"}[scale]
         self.plot.setLabel("left", label, units=None if scale == "dB" else (unit or None))
-        df = self.cfg.sample_rate / self.cfg.samples_per_channel
+        fs, points = self._resolution_source()
+        df = fs / points
         enbw = spectrum.enbw_bins(self.p("Fenêtre").value()) * df
         self.p("Mesures", "Résolution").setValue(f"{_si(df, 'Hz')} (ENBW {_si(enbw, 'Hz')})")
 

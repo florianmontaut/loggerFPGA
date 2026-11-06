@@ -81,6 +81,12 @@ class LoggerConfig:
     buffer_frames:  int = 64
     # voies calculées : [{"name", "formula", "unit", "enabled"}] (model/math_channels.py)
     math_channels:  list[dict] = field(default_factory=list)
+    # enregistrement long d'oscilloscope affiché (controller/scope_controller.py) ;
+    # valeurs nulles pour le logger : 25 MHz / diviseur, 16384 mots par trame, t = 0
+    sample_rate_hz: float = 0.0
+    record_points:  int = 0
+    time_origin:    float = 0.0
+    source_name:    str = ""
     # --- description des voies ---
     analog_names:   list[str] = field(default_factory=lambda: list(DEFAULT_ANALOG_NAMES))
     logic_names:    list[str] = field(default_factory=lambda: list(DEFAULT_LOGIC_NAMES))
@@ -103,6 +109,8 @@ class LoggerConfig:
 
     @property
     def samples_per_channel(self) -> int:
+        if self.record_points:
+            return self.record_points
         return WORDS_PER_FRAME // self.n_channels
 
     @property
@@ -111,6 +119,8 @@ class LoggerConfig:
 
     @property
     def sample_rate(self) -> float:
+        if self.sample_rate_hz > 0:
+            return self.sample_rate_hz
         return CLOCK_HZ / self.divider
 
     @property
