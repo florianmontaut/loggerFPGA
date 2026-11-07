@@ -1075,8 +1075,8 @@ def test_fft_zone_on_logger_frame(setup):
     # saisie des bornes dans l'arbre : seconde moitié -> 5 kHz
     fft.p("Début de zone").setValue(1.1 * half)
     fft.p("Fin de zone").setValue(1.9 * half)
-    assert fft.zone_range() == pytest.approx((1.1 * half, 1.9 * half))
-    assert abs(_fft_peak(fft) - 5000) < 60
+    assert fft.zone_range() == pytest.approx((1.1 * half, 1.9 * half))   # zone tout de suite
+    assert wait(qapp, lambda: abs(_fft_peak(fft) - 5000) < 60, 2)         # calcul après 100 ms
     # zone déplacée à la souris (signal de pyqtgraph) : recalcul regroupé
     fft.zone.setRegion((0.1 * half, 0.6 * half))
     assert fft.p("Début de zone").value() == pytest.approx(0.1 * half)
@@ -1150,3 +1150,74 @@ def test_fft_zone_on_scope_record(setup, tmp_path, monkeypatch):
     monkeypatch.setattr(scope_module, "MAX_FFT_ZONE_POINTS", 10_000)
     fft.set_zone(t[0], t[50_000])
     assert "au plus" in fft.plot.titleLabel.text
+
+
+def test_fft_zone_recalculation_is_throttled(setup, monkeypatch):
+    """Glisser : un seul calcul au relâchement ; sinon un calcul 100 ms après le dernier
+    changement ; jamais deux calculs pour la même zone."""
+    import time
+    qapp, sim, window, ctrl = setup
+    ctrl.config_ctrl.p("Échantillonnage", "Diviseur").setValue(500)
+    cfg = ctrl.config_ctrl.to_config()
+    fft = ctrl.fft_ctrl
+    window.actionFFT.setChecked(True)
+    frame = _two_tone_frame(cfg)
+    ctrl.graph_ctrl.show_frame(frame)
+    fft.show_frame(frame)
+    fft.set_zone(0.005, 0.02)
+    computed = []
+    original = fft._compute
+    monkeypatch.setattr(fft, "_compute", lambda f: computed.append(fft.zone_range()) or original(f))
+
+    def pump(seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            qapp.processEvents()
+            time.sleep(0.005)
+
+    def drag_region(lo, hi):
+        """Ce qu'émet LinearRegionItem.mouseDragEvent pendant un glisser de la zone."""
+        fft.zone.blockLineSignal = True
+        fft.zone.lines[0].setPos(lo)
+        fft.zone.lines[1].setPos(hi)
+        fft.zone.blockLineSignal = False
+        fft.zone.sigRegionChanged.emit(fft.zone)
+
+    # glisser de la zone entière, bouton enfoncé pendant 1 s avec des pauses de 200 ms
+    fft.zone.moving = True
+    for k in range(5):
+        drag_region(0.005 + 0.002 * k, 0.02 + 0.002 * k)
+        pump(0.2)
+    assert computed == []                                  # rien pendant le glisser
+    assert fft.p("Début de zone").value() == pytest.approx(0.013)   # bornes suivies
+    fft.zone.sigRegionChangeFinished.emit(fft.zone)        # (ignoré tant que bouton enfoncé)
+    assert computed == []
+    fft.zone.moving = False                                # relâchement (mouseDragEvent)
+    fft.zone.sigRegionChangeFinished.emit(fft.zone)
+    pump(0.25)
+    assert computed == [pytest.approx((0.013, 0.028))]
+
+    # glisser d'une borne (InfiniteLine.mouseDragEvent) : idem
+    computed.clear()
+    line = fft.zone.lines[1]
+    line.moving = True
+    for k in range(4):
+        line.setPos(0.03 + 0.002 * k)
+        pump(0.15)
+    assert computed == []
+    line.moving = False
+    line.sigPositionChangeFinished.emit(line)
+    pump(0.25)
+    assert computed == [pytest.approx((0.013, 0.036))]
+    # second signal de fin pour la même zone : pas de second calcul
+    fft.zone.sigRegionChangeFinished.emit(fft.zone)
+    pump(0.15)
+    assert len(computed) == 1
+
+    # saisie des bornes au clavier, caractère par caractère : un seul calcul
+    computed.clear()
+    for value in (0.0, 0.0, 0.01, 0.015):
+        fft.p("Début de zone").setValue(value)
+        pump(0.03)
+    pump(0.25)
+    assert computed == [pytest.approx((0.015, 0.036))]

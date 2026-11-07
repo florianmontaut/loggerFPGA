@@ -489,9 +489,13 @@ l'arbre des paramètres :
   * **Réglage** : déplacer toute la zone, tirer une borne, ou saisir *Début de zone* et
     *Fin de zone*. *Zone = portion affichée* la cale sur le zoom courant ; c'est aussi sa
     position la première fois qu'on choisit ce mode.
-  * **Recalcul** : regroupé pendant le déplacement (120 ms), immédiat au relâchement. La
-    moyenne ou le maximum recommence à chaque changement de zone. Le titre du spectre et
-    l'entrée *Zone* indiquent la durée et le nombre de points (16 au moins).
+  * **Recalcul** : jamais pendant un glisser à la souris (de la zone ou d'une borne,
+    même avec des pauses) : un seul calcul au relâchement. Les bornes affichées suivent
+    le glisser en continu. Pour une saisie de *Début* / *Fin de zone*, le calcul a lieu
+    100 ms après le dernier changement, et non à chaque caractère. Une zone déjà calculée
+    ne l'est pas une seconde fois. La moyenne ou le maximum recommence à chaque
+    changement de zone. Le titre du spectre et l'entrée *Zone* indiquent la durée et le
+    nombre de points (16 au moins).
   * **Logger** : la zone découpe chaque trame, en direct comme en relecture.
   * **Enregistrement d'oscilloscope** : la zone est lue dans le fichier, en données
     brutes, **quel que soit le zoom**. On peut donc choisir une zone sur l'enveloppe de
@@ -549,7 +553,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-201 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, acquisition complète contre le
+202 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes
