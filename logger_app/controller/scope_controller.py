@@ -33,6 +33,7 @@ from model.scope_record import (MAX_RAW_POINTS, ImportCancelled, ScopeError, Sco
 from ressources import pens
 
 RELOAD_DELAY_MS = 60               # regroupe les changements de zoom rapprochés
+MAX_FFT_ZONE_POINTS = 4_000_000    # FFT sur zone : points bruts par voie au plus
 
 
 def is_scope_file(path: str) -> bool:
@@ -376,6 +377,24 @@ class ScopeController(QtCore.QObject):
                            "saved": self.record.path,
                            "title": f"{os.path.basename(self.record.path)} — {what}"})
         return frame
+
+    def read_zone(self, t0: float, t1: float):
+        """
+        Données brutes de [t0, t1] pour la FFT sur zone, lues dans le fichier quel que soit
+        le zoom affiché : (voies (n, k), fréquence d'échantillonnage, indices des voies).
+        ValueError (message affiché) si la zone dépasse MAX_FFT_ZONE_POINTS points.
+        """
+        if self.record is None:
+            raise ValueError("aucun enregistrement")
+        start, stop = self.record.index_of(t0), self.record.index_of(t1) + 1
+        stop = min(stop, self.record.length)
+        n = stop - start
+        if n > MAX_FFT_ZONE_POINTS:
+            raise ValueError(f"zone de {measures.si(n, '', 3)} points : "
+                             f"{measures.si(MAX_FFT_ZONE_POINTS, '', 2)} au plus, la réduire")
+        data = np.column_stack([np.asarray(self.record.raw(name)[start:stop], dtype=float)
+                                for name in self.record.names]) if n > 0 else np.empty((0, 1))
+        return data, self.record.sample_rate, list(range(len(self.record.names)))
 
     def show_all(self):
         if self.record is not None:
