@@ -123,8 +123,11 @@ class MainWindow(QtWidgets.QMainWindow):
         menu = self.menuBar().addMenu("Fichier")
         menu.addActions([self.actionLoadConfig, self.actionSaveConfig])
         menu.addSeparator()
-        menu.addActions([self.actionOpenRecording, self.actionAddScopeChannels,
-                         self.actionCloseScope, self.actionSaveBuffer])
+        menu.addAction(self.actionOpenRecording)
+        # rempli par RecentFilesController (controller/recent_controller.py)
+        self.menuRecent = menu.addMenu("Fichiers récents")
+        menu.addActions([self.actionAddScopeChannels, self.actionCloseScope,
+                         self.actionSaveBuffer])
         menu.addSeparator()
         menu.addAction(self.actionQuit)
         menu = self.menuBar().addMenu("Acquisition")

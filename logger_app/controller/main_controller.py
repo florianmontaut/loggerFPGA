@@ -29,6 +29,7 @@ from controller.detach_controller import DetachController
 from controller.fft_controller import FFTController
 from controller.graph_controller import LiveGraphController
 from controller.math_controller import MathController
+from controller.recent_controller import RecentFilesController
 from controller.scope_controller import ScopeController, is_scope_file
 from model.config import ConfigError, LoggerConfig
 from model.frame_buffer import MAX_CAPACITY
@@ -81,6 +82,9 @@ class MainController(QtCore.QObject):
         # réglages de l'interface conservés d'une session à l'autre (fenêtres déportées,
         # axe des fréquences de la FFT)
         self.settings = QtCore.QSettings("LoggerFPGA", "logger_app") if remember else None
+        # fichiers récents et dernier répertoire visité (boîtes d'ouverture)
+        self.recent_ctrl = RecentFilesController(view.menuRecent, self.settings,
+                                                 lambda: self._record_settings()[0])
         # voies calculées (MATH) : formules sur les voies de chaque trame
         self.math_ctrl = MathController(view.configtree,
                                         definitions_from_config(self.config_ctrl.cfg))
@@ -144,6 +148,10 @@ class MainController(QtCore.QObject):
         v.actionOpenRecording.triggered.connect(self.open_recording_dialog)
         v.actionCloseScope.triggered.connect(lambda: self.scope_ctrl.close())
         v.actionAddScopeChannels.triggered.connect(self.add_scope_channels_dialog)
+        self.recent_ctrl.open_requested.connect(self._open_recent)
+        self.recent_ctrl.missing.connect(self._recent_missing)
+        self.scope_ctrl.loaded.connect(
+            lambda h5, sources: self.recent_ctrl.add("scope", [h5], visited=sources[0]))
         self.scope_ctrl.opened.connect(self._on_scope_opened)
         self.scope_ctrl.closed.connect(self._on_scope_closed)
         self.scope_ctrl.display_frame.connect(lambda frame: self._display_frame(frame, "scope"))
@@ -232,7 +240,7 @@ class MainController(QtCore.QObject):
                 self.view, "Ouvrir un enregistrement",
                 "Arrêtez l'acquisition (F7) avant d'ouvrir un enregistrement.")
             return
-        directory = self._record_settings()[0]
+        directory = self.recent_ctrl.last_dir         # dossier du dernier fichier chargé
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self.view, "Ouvrir un enregistrement — un CSV par voie d'oscilloscope : "
             "Ctrl+clic pour les choisir ensemble", directory,
@@ -269,7 +277,7 @@ class MainController(QtCore.QObject):
     def add_scope_channels_dialog(self):
         if not self.scope_ctrl.active:
             return
-        directory = os.path.dirname(self.scope_ctrl.record.path)
+        directory = self.recent_ctrl.last_dir
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self.view, "Ajouter des voies — Ctrl+clic pour en choisir plusieurs", directory,
             "Oscilloscope : CSV Tektronix, HDF5 (*.csv *.h5 *.hdf5);;Tous les fichiers (*)")
@@ -350,7 +358,26 @@ class MainController(QtCore.QObject):
         if notes:
             message += " — " + " ; ".join(notes)
         self.view.show_message(message, 12000)
+        self.recent_ctrl.add("logger", [path])
         return True
+
+    # ------------------------------------------------------------------ fichiers récents
+    def _open_recent(self, entry: dict):
+        if entry["kind"] == "config":
+            self.load_config(entry["paths"][0])
+            return
+        if self.acq_ctrl.running:
+            QtWidgets.QMessageBox.information(
+                self.view, "Fichiers récents",
+                "Arrêtez l'acquisition (F7) avant d'ouvrir un enregistrement.")
+            return
+        self.open_files(entry["paths"])
+
+    def _recent_missing(self, entry: dict):
+        QtWidgets.QMessageBox.warning(
+            self.view, "Fichiers récents",
+            "Fichier introuvable, retiré de la liste :\n" + "\n".join(
+                p for p in entry["paths"] if not os.path.exists(p)))
 
     def _on_math_changed(self):
         """Voies calculées modifiées : courbes, arborescence et curseurs mis à jour."""
@@ -451,7 +478,8 @@ class MainController(QtCore.QObject):
     # ------------------------------------------------------------------ fichiers
     def load_config_dialog(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self.view, "Ouvrir une configuration",
-                                                        "", "Configuration (*.json)")
+                                                        self.recent_ctrl.last_dir,
+                                                        "Configuration (*.json)")
         if path:
             self.load_config(path)
 
@@ -467,11 +495,13 @@ class MainController(QtCore.QObject):
         self.math_ctrl.set_definitions(definitions_from_config(cfg))
         self._apply_preview(cfg)
         self.view.show_message(f"Configuration chargée : {path}")
+        self.recent_ctrl.add("config", [path])
 
     def save_config_dialog(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self.view,
                                                         "Enregistrer la configuration",
-                                                        "logger_config.json",
+                                                        os.path.join(self.recent_ctrl.last_dir,
+                                                                     "logger_config.json"),
                                                         "Configuration (*.json)")
         if path:
             try:

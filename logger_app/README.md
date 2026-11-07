@@ -93,6 +93,7 @@ logger_app/
 │   ├── graph_controller.py        graphique temps réel (analogique + logique, seuil, curseur)
 │   ├── fft_controller.py          spectre temps réel et réglages FFT
 │   ├── scope_controller.py        mode enregistrement long (vue d'ensemble, zoom, import)
+│   ├── recent_controller.py       fichiers récents, dernier répertoire visité
 │   ├── math_controller.py         groupe « Voies calculées » (formules, état)
 │   ├── buffer_controller.py       onglet Trames : mémoire tampon, relecture, sauvegarde, confirmations
 │   ├── cursor_controller.py       curseurs de mesure (t1/t2, y1/y2) et mesures associées
@@ -226,6 +227,28 @@ trame,temps_s,I_HV (V),V_PH1_INV2 (V),K_HV,K_PRE,L2,...
 
 Les trames enregistrées par ce bouton sont marquées ✓ dans la mémoire tampon : elles ne
 sont pas proposées à nouveau avant de quitter.
+
+### Fichiers récents et dernier répertoire
+
+Sur le modèle du menu *Recent files* du GLviewer :
+
+* **Fichier › Fichiers récents** liste les 10 derniers fichiers chargés avec succès, le
+  plus récent en tête et sans doublon, avec leur type :
+  * **logger** : relecture dans la mémoire tampon ;
+  * **oscilloscope** : c'est le workspace `.h5` qui est retenu, avec les voies ajoutées,
+    pour une réouverture immédiate sans nouvelle conversion ;
+  * **configuration**.
+* Un clic rouvre le fichier comme il avait été chargé. Les touches 1 à 9 et 0 servent de
+  raccourcis dans le menu, et l'info-bulle donne le chemin complet. Un fichier disparu
+  est signalé et retiré de la liste. *Effacer la liste* vide le menu.
+* **Dernier répertoire** : c'est le dossier du dernier fichier chargé. Pour un
+  enregistrement d'oscilloscope, c'est celui des CSV choisis (ou des voies ajoutées),
+  pas celui du `.h5`. Les boîtes d'ouverture s'y ouvrent : *Ouvrir un
+  enregistrement...*, *Ajouter des voies...*, *Ouvrir une configuration...* (et
+  *Enregistrer la configuration...*). Avant tout chargement, ou si ce dossier n'existe
+  plus, elles s'ouvrent sur le dossier d'enregistrement.
+* La liste et le répertoire sont conservés d'une session à l'autre (réglages de
+  l'application, QSettings).
 
 ### Relire un enregistrement
 
@@ -504,7 +527,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-193 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, acquisition complète contre le
+198 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes
