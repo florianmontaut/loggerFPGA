@@ -23,7 +23,7 @@ from PyQt6 import QtCore, QtGui
 from model import measures, spectrum
 from model.config import LoggerConfig
 from model.protocol import Frame
-from ressources import pens
+from ressources import pens, zoom
 
 NONE = "(aucune)"
 LINEAR, LOG = "Linéaire", "Logarithmique"
@@ -209,6 +209,8 @@ class FFTController(QtCore.QObject):
         self.log_action.blockSignals(False)
         # coche la case Log X de pyqtgraph : c'est son signal qui convertit courbes et axes
         # (PlotItem.updateLogMode) ; set_log_x, rappelé avec la même valeur, est sans effet
+        # limites levées pendant le changement d'unité (Hz <-> décades), reposées ensuite
+        zoom.clear_x(self.plot.vb)
         self.plot.setLogMode(x=log, y=False)
         self._apply_axis_label()
         self._apply_x_range()           # après updateLogMode, qui réactive l'échelle auto
@@ -539,22 +541,33 @@ class FFTController(QtCore.QObject):
             return
         fs, points = self._resolution_source()
         f_max = self.p("Fréquence max (Hz)").value() or fs / 2
+        df = fs / points
+        # dézoom limité au spectre entier (0 à fs/2, + 5 %), zoom à quelques raies ;
+        # limites avant la plage (sinon les anciennes la rognent)
         if self.log_x:
-            df = fs / points
-            self.plot.setXRange(np.log10(df), np.log10(f_max), padding=0)
+            zoom.limit_x(self.plot.vb, np.log10(df), np.log10(fs / 2), min_range=0.01,
+                         margin=0.05)
+            self.plot.setXRange(np.log10(df), np.log10(min(f_max, fs / 2)), padding=0)
         else:
-            self.plot.setXRange(0, f_max, padding=0)
+            zoom.limit_x(self.plot.vb, 0.0, fs / 2, min_range=4 * df, margin=0.05)
+            self.plot.setXRange(0, min(f_max, fs / 2), padding=0)
 
     def _redraw(self):
         if not (self._dirty and self.enabled) or self.amp is None:
             return
         self._dirty = False
         keep = self._x(self.freq)
+        scaled = {j: self._scaled(self.amp[keep, j]) for j in range(len(self.signals))}
+        # dézoom vertical limité aux valeurs affichées (+ 25 %)
+        visible = [scaled[j] for j, sig in enumerate(self.signals)
+                   if sig in self.curves and self.curves[sig].isVisible()]
+        span = zoom.bounds(*visible) if visible else None
+        if span is not None:
+            zoom.limit_y(self.plot.vb, *span)
         for j, sig in enumerate(self.signals):
             curve = self.curves.get(sig)
             if curve is not None:
-                curve.setData(self.freq[keep], self._scaled(self.amp[keep, j]),
-                              skipFiniteCheck=True)
+                curve.setData(self.freq[keep], scaled[j], skipFiniteCheck=True)
         self._update_measures()
 
     def _update_labels(self):
