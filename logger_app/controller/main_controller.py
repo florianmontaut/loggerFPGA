@@ -29,6 +29,7 @@ from controller.detach_controller import DetachController
 from controller.fft_controller import FFTController
 from controller.graph_controller import LiveGraphController
 from controller.math_controller import MathController
+from controller.pattern_controller import PatternController
 from controller.recent_controller import RecentFilesController
 from controller.scope_controller import ScopeController, is_scope_file
 from model.config import ConfigError, LoggerConfig
@@ -118,6 +119,14 @@ class MainController(QtCore.QObject):
         self.fft_ctrl.set_zone_plot(self.graph_ctrl.analog_plot)
         self.fft_ctrl.zone_reader_provider = (
             lambda: self.scope_ctrl.read_zone if self.scope_ctrl.active else None)
+        # export d'un motif (clic droit sur un graphique) : table de points d'une voie
+        self.pattern_ctrl = PatternController(
+            view, self.graph_ctrl,
+            lambda: self.scope_ctrl.read_zone_frame if self.scope_ctrl.active else None,
+            lambda: self.recent_ctrl.last_dir)
+        self.pattern_ctrl.message.connect(view.show_message)
+        # trame affichée renouvelée (direct, relecture) : motif recalculé
+        self.graph_ctrl.redrawn.connect(self._on_redrawn_for_pattern)
 
         self._connect()
         self._apply_preview(self.config_ctrl.cfg)
@@ -390,6 +399,15 @@ class MainController(QtCore.QObject):
         self.tree_ctrl.set_math_channels(
             [(item.name, item.unit) for item in self.math_ctrl.engine.active])
         self.cursor_ctrl.refresh()
+        if getattr(self, "pattern_ctrl", None) is not None and self.pattern_ctrl.active:
+            self.pattern_ctrl.refresh_channels()
+            self.pattern_ctrl.update()
+
+    def _on_redrawn_for_pattern(self):
+        # enregistrement d'oscilloscope : le motif est lu dans le fichier, pas dans la
+        # portion affichée ; inutile de le recalculer à chaque zoom
+        if self.pattern_ctrl.active and not self.scope_ctrl.active:
+            self.pattern_ctrl.update()
 
     def _on_config_changed(self, cfg: LoggerConfig):
         self.buffer_ctrl.set_capacity(cfg.buffer_frames)
@@ -409,6 +427,9 @@ class MainController(QtCore.QObject):
         self.cursor_ctrl.configure(cfg)
         self.fft_ctrl.configure(cfg)
         self.math_ctrl.set_config(cfg)          # -> _on_math_changed
+        if self.pattern_ctrl.active:
+            self.pattern_ctrl.refresh_channels()
+            self.pattern_ctrl.update()
 
     def _on_graph_values(self, values: dict):
         """Valeurs sous le curseur simple (double-clic), sauf si les curseurs t1/t2 sont actifs."""
@@ -526,6 +547,7 @@ class MainController(QtCore.QObject):
 
     def quit(self):
         self.acq_ctrl.shutdown()
+        self.pattern_ctrl.stop()
         self.scope_ctrl.close(emit=False)
         self.detach_ctrl.shutdown()
         if self.remember:

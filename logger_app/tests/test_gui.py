@@ -1312,3 +1312,124 @@ def test_zoom_limits_scope_record(setup, tmp_path, monkeypatch):
     window.grab()
     assert vb.viewRange()[1][1] - vb.viewRange()[1][0] < 1e-4
     assert errors == []
+
+
+# ------------------------------------------------------------------ export d'un motif
+
+def _menu_action(plot, text):
+    return next(a for a in plot.vb.menu.actions() if a.text() == text)
+
+
+def test_export_pattern(setup, tmp_path, monkeypatch):
+    from model.protocol import encode_payload, make_frame
+    qapp, sim, window, ctrl = setup
+    pc = ctrl.pattern_ctrl
+    ctrl.config_ctrl.p("Échantillonnage", "Diviseur").setValue(500)          # 50 kHz
+    cfg = ctrl.config_ctrl.to_config()
+    n = cfg.samples_per_channel
+    t = np.arange(n) / cfg.sample_rate
+    raw = np.zeros((n, 4), dtype=np.int16)
+    raw[:, 0] = (np.sin(2 * np.pi * 100 * t) * 8000).astype(np.int16)        # I_HV
+    raw[:, 3] = ((t * 1000).astype(int) % 2)                                  # K_HV : 500 Hz
+    frame = make_frame(encode_payload(raw), cfg, 1)
+    ctrl.math_ctrl.add()
+    ctrl.math_ctrl._groups()[0].child("Formule").setValue("[I_HV]*2")
+    ctrl.graph_ctrl.show_frame(frame)
+    wait(qapp, lambda: False, 0.1)
+    plot = ctrl.graph_ctrl.analog_plot
+    plot.setXRange(0.01, 0.06, padding=0)
+
+    # clic droit › Exporter un motif...
+    _menu_action(plot, "Exporter un motif...").trigger()
+    assert pc.active and pc.dialog.isVisible()
+    assert pc.region in plot.items and pc.scatter in plot.items
+    t0, t1 = pc.zone()
+    assert (t0, t1) == pytest.approx((0.025, 0.045))                          # milieu de la vue
+    assert pc.dialog.start.value() == pytest.approx(0.025)
+    p = pc.pattern
+    assert p.points == 1001 and p.step == 1                                   # 1 001 < 2 000
+    xs, ys = pc.scatter.getData()
+    np.testing.assert_allclose(ys, frame.analog[1250:2251, 0])
+    lines = pc.dialog.preview.toPlainText().splitlines()
+    assert lines[0] == "t (s)\tI_HV (V)" and lines[1].startswith("0\t")
+    assert "1002 lignes" in lines[-1]
+
+    # décimation : 100 points au plus -> 1 point sur 11, bornes gardées
+    pc.dialog.max_points.setValue(100)
+    assert pc.pattern.points <= 100 and pc.pattern.step == 11
+    assert pc.pattern.t[-1] == pytest.approx(0.045)
+    assert pc.dialog.info.text().startswith("1 001 échantillons dans la zone, 1 point sur 11 : ")
+    assert len(pc.scatter.getData()[0]) == pc.pattern.points
+
+    # zone saisie dans la fenêtre (mise à jour après 100 ms)
+    pc.dialog.start.setValue(0.0)
+    pc.dialog.stop.setValue(0.01)
+    assert wait(qapp, lambda: pc.pattern.t[0] == 0.0 and pc.pattern.t[-1] == pytest.approx(0.01), 2)
+
+    # voie calculée : points marqués sur le panneau des voies calculées
+    pc.dialog.channel.setCurrentIndex([c[0] for c in pc.channels].index(("M", "M1")))
+    assert pc.scatter in ctrl.graph_ctrl.math_plot.items and pc.scatter not in plot.items
+    i = np.round(pc.pattern.t * cfg.sample_rate).astype(int)
+    np.testing.assert_allclose(pc.pattern.y, 2 * frame.analog[i, 0], rtol=1e-9)
+    # voie logique : créneau 0/1, points au niveau de la voie sur son panneau
+    pc.dialog.channel.setCurrentIndex([c[0] for c in pc.channels].index(("L", 0)))
+    assert set(np.unique(pc.pattern.y)) == {0.0, 1.0}
+    assert pc.scatter in ctrl.graph_ctrl.logic_plot.items
+    window.grab().save(str(SHOTS / "logger_motif.png"))
+
+    # formats et copie dans le presse-papiers
+    pc.dialog.channel.setCurrentIndex(0)
+    pc.dialog.format.setCurrentText("PWL (PSPICE, LTspice)")
+    pc.dialog.copy_button.click()
+    text = QtWidgets.QApplication.clipboard().text()
+    first = text.splitlines()[0].split()
+    assert len(first) == 2 and float(first[0]) == 0.0
+    assert len(text.splitlines()) == pc.pattern.points
+    assert "copié" in window.statusBar().currentMessage()
+    pc.dialog.format.setCurrentText("Vecteurs (PLECS, MATLAB)")
+    assert pc.text.startswith("t = [0 ") and "\nI_HV = [" in pc.text
+    pc.dialog.format.setCurrentText("Colonnes (tabulation)")
+    pc.dialog.grab().save(str(SHOTS / "logger_motif_fenetre.png"))
+    # enregistrement (dans le dernier répertoire)
+    seen = []
+    target = tmp_path / "motif.txt"
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        lambda parent, caption, default, *a: seen.append(default) or (str(target), ""))
+    pc.dialog.save_button.click()
+    assert target.read_text() == pc.text
+    assert seen[0].endswith("motif_I_HV.txt")
+
+    # fermeture : zone et points retirés
+    pc.dialog.close()
+    assert not pc.active and pc.region not in plot.items
+    assert pc.scatter not in ctrl.graph_ctrl.logic_plot.items
+
+
+def test_export_pattern_scope_record(setup, tmp_path):
+    """Enregistrement long : motif lu dans le fichier, même si l'affichage est une enveloppe."""
+    qapp, sim, window, ctrl = setup
+    pc = ctrl.pattern_ctrl
+    n = 200_000
+    k = np.arange(n)
+    y = np.sin(k / 400.0)
+    path = _tek_channel(tmp_path / "tek0000CH1.csv", y)
+    ctrl.scope_ctrl.max_raw = 20_000
+    _open_scope(qapp, ctrl, [path])
+    assert ctrl.graph_ctrl.frame.meta["envelope"]
+    plot = ctrl.graph_ctrl.analog_plot
+    _menu_action(plot, "Exporter un motif...").trigger()
+    rec = ctrl.scope_ctrl.record
+    pc.set_zone(rec.time_of(50_000), rec.time_of(150_000))             # 100 001 points bruts
+    p = pc.pattern
+    assert p.zone_points == 100_001 and p.points <= 2000
+    i = np.round((p.t - rec.t0) / rec.dt).astype(int)
+    np.testing.assert_allclose(p.y, y[i], atol=1e-6)                   # valeurs brutes
+    assert i[0] == 50_000 and i[-1] == 150_000
+    window.grab().save(str(SHOTS / "logger_motif_scope.png"))
+    # zoom : le motif ne change pas
+    before = p.t.copy()
+    plot.setXRange(rec.time_of(1000), rec.time_of(3000), padding=0)
+    ctrl.scope_ctrl.reload()
+    wait(qapp, lambda: False, 0.1)
+    np.testing.assert_array_equal(pc.pattern.t, before)
+    pc.stop()
