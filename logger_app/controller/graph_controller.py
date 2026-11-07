@@ -22,7 +22,7 @@ from PyQt6 import QtCore
 
 from model.config import LoggerConfig, TriggerType
 from model.protocol import Frame
-from ressources import pens
+from ressources import pens, zoom
 
 
 class LiveGraphController(QtCore.QObject):
@@ -123,11 +123,13 @@ class LiveGraphController(QtCore.QObject):
                 self.curves[("L", bit)] = curve
             self.logic_plot.getAxis("left").setTicks(
                 [[(b + self.LOGIC_HEIGHT / 2, cfg.logic_name(b)) for b in range(16)]])
+            zoom.limit_y(self.logic_plot.vb, -0.5, 16, margin=0.05)
             self.logic_plot.setYRange(-0.5, 16, padding=0)
             if not cfg.analog_signals:
                 span, t0 = cfg.frame_duration, cfg.time_origin
                 # limites d'abord : sinon la nouvelle plage est rognée par les anciennes
-                self.logic_plot.setLimits(xMin=t0 - 0.05 * span, xMax=t0 + 1.05 * span)
+                zoom.limit_x(self.logic_plot.vb, t0, t0 + span,
+                             min_range=10 / cfg.sample_rate, margin=0.05)
                 self.logic_plot.setXRange(t0, t0 + span, padding=0)
 
         if self.threshold_line in self.analog_plot.items:
@@ -142,8 +144,12 @@ class LiveGraphController(QtCore.QObject):
         span, t0 = cfg.frame_duration, cfg.time_origin
         # limites d'abord : sinon une trame plus longue que la précédente reste rognée
         # à l'ancienne durée
-        self.analog_plot.setLimits(xMin=t0 - 0.05 * span, xMax=t0 + 1.05 * span)
+        # dézoom limité à la trame (à l'enregistrement) + 5 %, zoom à 10 échantillons ;
+        # sur chaque panneau : les limites ne se transmettent pas par le lien des axes
+        for plot in (self.analog_plot, self.logic_plot, self.math_plot):
+            zoom.limit_x(plot.vb, t0, t0 + span, min_range=10 / cfg.sample_rate, margin=0.05)
         self.analog_plot.setXRange(t0, t0 + span, padding=0)
+        self._update_y_limits()
         self._apply_y_range()
         self.analog_plot.setTitle("En attente de données")
 
@@ -181,7 +187,36 @@ class LiveGraphController(QtCore.QObject):
 
     def set_auto_range(self, enabled: bool):
         self.auto_range = enabled
+        self._update_y_limits()
         self._apply_y_range()
+
+    def _update_y_limits(self, math_results: dict | None = None):
+        """
+        Dézoom vertical limité aux valeurs des courbes visibles (+ 25 %), comme le
+        GLviewer : sans limite, pyqtgraph échoue sur des plages démesurées.
+        """
+        cfg, frame = self.cfg, self.frame
+        if cfg is None:
+            return
+        if cfg.analog_signals:
+            arrays = []
+            if frame is not None:
+                cols = [j for j, s in enumerate(frame.analog_signals)
+                        if ("A", s) not in self.hidden]
+                if cols:
+                    arrays.append(frame.analog[:, cols])
+            if self.threshold_line in self.analog_plot.items:
+                arrays.append([self.threshold_line.value()])
+            if not self.auto_range or not arrays:          # échelle fixe de logger.m
+                arrays.append([-self._fixed_y, self._fixed_y])
+            span = zoom.bounds(*arrays)
+            if span is not None:
+                zoom.limit_y(self.analog_plot.vb, *span)
+        results = math_results if math_results is not None else (
+            self.math_results() if frame is not None else {})
+        visible = [y for name, y in results.items() if ("M", name) not in self.hidden]
+        span = zoom.bounds(*visible) if visible else None
+        zoom.limit_y(self.math_plot.vb, *(span or (-1.0, 1.0)))
 
     def _apply_y_range(self):
         if self.cfg is None or not self.cfg.analog_signals:
@@ -196,6 +231,7 @@ class LiveGraphController(QtCore.QObject):
         (self.hidden.discard if visible else self.hidden.add)(key)
         if key in self.curves:
             self.curves[key].setVisible(visible)
+        self._update_y_limits()
 
     def set_paused(self, paused: bool):
         self.paused = paused
@@ -223,6 +259,8 @@ class LiveGraphController(QtCore.QObject):
         self._dirty = False
         frame = self.frame
         t = frame.time()
+        # limites de zoom avant les données : l'échelle automatique les respecte
+        self._update_y_limits()
         for j, sig in enumerate(frame.analog_signals):
             curve = self.curves.get(("A", sig))
             if curve is not None:

@@ -1221,3 +1221,94 @@ def test_fft_zone_recalculation_is_throttled(setup, monkeypatch):
         pump(0.03)
     pump(0.25)
     assert computed == [pytest.approx((0.015, 0.036))]
+
+
+# ------------------------------------------------------------------ limites de zoom
+
+def _wheel(qapp, vb, factor, steps=60):
+    for _ in range(steps):
+        vb.scaleBy((factor, factor))
+        qapp.processEvents()
+
+
+def test_zoom_limits_all_graphs(setup, monkeypatch):
+    """Molette : dézoom borné aux données (+ marge), zoom borné, aucune exception."""
+    import sys
+    from model.protocol import encode_payload, make_frame
+    qapp, sim, window, ctrl = setup
+    errors = []
+    monkeypatch.setattr(sys, "excepthook", lambda t, v, tb: errors.append(f"{t.__name__}: {v}"))
+    ctrl.config_ctrl.p("Échantillonnage", "Diviseur").setValue(500)
+    cfg = ctrl.config_ctrl.to_config()
+    window.actionFFT.setChecked(True)
+    ctrl.math_ctrl.add()
+    ctrl.math_ctrl._groups()[0].child("Formule").setValue("[I_HV]*2")
+    n = cfg.samples_per_channel
+    raw = (np.random.default_rng(0).standard_normal((n, 4)) * 3000).astype(np.int16)
+    frame = make_frame(encode_payload(raw), cfg, 1)
+    ctrl.graph_ctrl.show_frame(frame)
+    ctrl.fft_ctrl.show_frame(frame)
+    wait(qapp, lambda: False, 0.15)
+    g = ctrl.graph_ctrl
+    span = cfg.frame_duration
+    y_data = np.abs(frame.analog).max()
+    for plot in (g.analog_plot, g.math_plot, g.logic_plot, ctrl.fft_ctrl.plot):
+        _wheel(qapp, plot.vb, 3)                       # 60 crans en arrière
+        window.grab()
+    for plot in (g.analog_plot, g.math_plot, g.logic_plot):
+        x0, x1 = plot.vb.viewRange()[0]
+        assert x0 >= -0.051 * span and x1 <= 1.051 * span
+    y0, y1 = g.analog_plot.vb.viewRange()[1]
+    assert max(abs(y0), abs(y1)) < 2 * y_data
+    y0, y1 = g.math_plot.vb.viewRange()[1]
+    assert max(abs(y0), abs(y1)) < 4 * y_data            # [I_HV]*2
+    assert g.logic_plot.vb.viewRange()[1][1] < 17.5
+    fx0, fx1 = ctrl.fft_ctrl.plot.vb.viewRange()[0]
+    assert fx0 >= -0.051 * cfg.sample_rate / 2 and fx1 <= 1.051 * cfg.sample_rate / 2
+    assert ctrl.fft_ctrl.plot.vb.viewRange()[1][1] < 10
+    # zoom avant maximal : 10 échantillons en temps, quelques raies en fréquence
+    for plot in (g.analog_plot, g.math_plot, ctrl.fft_ctrl.plot):
+        _wheel(qapp, plot.vb, 1 / 3)
+        window.grab()
+    x0, x1 = g.analog_plot.vb.viewRange()[0]
+    assert x1 - x0 == pytest.approx(10 / cfg.sample_rate, rel=0.05)
+    fx0, fx1 = ctrl.fft_ctrl.plot.vb.viewRange()[0]
+    assert fx1 - fx0 == pytest.approx(4 * cfg.sample_rate / n, rel=0.05)
+    # FFT en échelle log : limites en décades
+    ctrl.fft_ctrl.set_log_x(True)
+    _wheel(qapp, ctrl.fft_ctrl.plot.vb, 3)
+    window.grab()
+    lo, hi = ctrl.fft_ctrl.plot.vb.viewRange()[0]
+    assert np.log10(cfg.sample_rate / n) - 0.5 < lo and hi < np.log10(cfg.sample_rate / 2) + 0.5
+    ctrl.fft_ctrl.set_log_x(False)
+    assert ctrl.fft_ctrl.plot.vb.viewRange()[0][1] == pytest.approx(cfg.sample_rate / 2)
+    # courbe masquée : le dézoom vertical suit les courbes visibles
+    for sig in (4, 6):
+        ctrl.tree_ctrl.items[("A", sig)][0].setCheckState(
+            ctrl.tree_ctrl.items[("A", sig)][0].checkState().Unchecked)
+    limit = g.analog_plot.vb.state["limits"]["yLimits"][1]
+    assert limit == pytest.approx(np.abs(frame.analog[:, 0]).max(), rel=0.5)
+    assert errors == []
+
+
+def test_zoom_limits_scope_record(setup, tmp_path, monkeypatch):
+    """Enregistrement d'oscilloscope : dézoom borné à l'enregistrement entier."""
+    import sys
+    qapp, sim, window, ctrl = setup
+    errors = []
+    monkeypatch.setattr(sys, "excepthook", lambda t, v, tb: errors.append(f"{t.__name__}: {v}"))
+    n = 40_000
+    path = _tek_channel(tmp_path / "tek0000CH1.csv", np.sin(np.arange(n) / 50) * 0.002)
+    _open_scope(qapp, ctrl, [path])
+    vb = ctrl.graph_ctrl.analog_plot.vb
+    _wheel(qapp, vb, 3)
+    window.grab()
+    x0, x1 = vb.viewRange()[0]
+    rec = ctrl.scope_ctrl.record
+    assert x0 >= rec.t0 - 0.051 * rec.duration and x1 <= rec.t0 + 1.051 * rec.duration
+    y0, y1 = vb.viewRange()[1]
+    assert max(abs(y0), abs(y1)) < 0.004                  # signal de 2 mV
+    _wheel(qapp, vb, 1 / 3)                               # zoom avant : signal en mV
+    window.grab()
+    assert vb.viewRange()[1][1] - vb.viewRange()[1][0] < 1e-4
+    assert errors == []

@@ -102,6 +102,7 @@ logger_app/
 ├── view/main_window.py            fenêtre : barre d'outils, arbre, paramètres, graphiques, barre d'état
 ├── view/detached_window.py        fenêtre d'un graphique déporté
 ├── ressources/pens.py             couleurs des voies (palette tab20 du GLviewer)
+├── ressources/zoom.py             limites de zoom des graphiques
 ├── tools/fpga_simulator.py        simulateur du FPGA (UDP local)
 └── tests/                         protocole, acquisition contre le simulateur, interface hors écran
 ```
@@ -227,6 +228,30 @@ trame,temps_s,I_HV (V),V_PH1_INV2 (V),K_HV,K_PRE,L2,...
 
 Les trames enregistrées par ce bouton sont marquées ✓ dans la mémoire tampon : elles ne
 sont pas proposées à nouveau avant de quitter.
+
+### Limites de zoom
+
+Comme dans le GLviewer (`PlotPanel.update_zoom_limits`), chaque graphique est borné
+(`ViewBox.setLimits`, `ressources/zoom.py`). Sans ces bornes, la molette dézoomait
+jusqu'à des plages de 10³⁰. pyqtgraph échouait alors (« Maximum allowed dimension
+exceeded » dans le sous-échantillonnage, glyphes et QPainter inutilisables sous Windows).
+
+| Graphique | Dézoom maximal | Zoom maximal |
+|---|---|---|
+| Temps (voies analogiques, calculées, logiques) | trame ou enregistrement entier + 5 % | 10 échantillons |
+| Valeurs (voies analogiques, calculées) | valeurs des courbes visibles + 25 % de chaque côté | 10⁻⁶ de l'étendue des valeurs |
+| Voies logiques | les 16 niveaux | — (axe vertical fixe) |
+| FFT, fréquences | 0 à fs/2 (en décades en échelle log) + 5 % | 4 raies (0,01 décade en log) |
+| FFT, amplitudes | valeurs affichées + 25 % | 10⁻⁶ de l'étendue |
+
+* Les limites des valeurs suivent chaque trame affichée et les cases de l'arborescence
+  (une voie masquée n'élargit pas le dézoom). Elles incluent aussi la ligne de seuil et,
+  avec *Échelle auto* décochée, l'échelle fixe de `logger.m`.
+* Le zoom maximal en valeurs est relatif à l'étendue, et non fixé à 0,01 comme dans le
+  GLviewer, pour pouvoir zoomer sur des signaux d'oscilloscope en mV.
+* Les limites de temps sont posées sur chacun des trois panneaux temporels : pyqtgraph
+  ne les transmet pas par le lien des axes, et le dézoom fait sur le panneau des voies
+  calculées ou logiques leur échappait.
 
 ### Fichiers récents et dernier répertoire
 
@@ -553,7 +578,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-202 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, acquisition complète contre le
+206 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes
