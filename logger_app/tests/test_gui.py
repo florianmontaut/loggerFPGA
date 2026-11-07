@@ -1028,3 +1028,125 @@ def test_recent_file_missing(setup, tmp_path, monkeypatch):
     window.menuRecent.actions()[0].trigger()
     assert "introuvable" in shown[-1] and path in shown[-1]
     assert ctrl.recent_ctrl.entries == []
+
+
+# ------------------------------------------------------------------ FFT sur zone
+
+def _two_tone_frame(cfg, f1=1000.0, f2=5000.0):
+    """Trame : f1 dans la première moitié, f2 dans la seconde (voie 1)."""
+    from model.protocol import encode_payload, make_frame
+    n = cfg.samples_per_channel
+    t = np.arange(n) / cfg.sample_rate
+    y = np.where(t < t[n // 2], np.sin(2 * np.pi * f1 * t), np.sin(2 * np.pi * f2 * t))
+    raw = np.zeros((n, cfg.n_channels), dtype=np.int16)
+    raw[:, 0] = (y * 8000).astype(np.int16)
+    return make_frame(encode_payload(raw), cfg, 1)
+
+
+def _fft_peak(fft):
+    from model import spectrum
+    j = fft.signals.index(1)
+    return spectrum.find_peaks(fft.freq, fft.amp[:, j], 1, fft.p("Fenêtre").value(),
+                               min_frequency=fft.freq[1])[0].frequency
+
+
+def test_fft_zone_on_logger_frame(setup):
+    qapp, sim, window, ctrl = setup
+    ctrl.config_ctrl.p("Échantillonnage", "Diviseur").setValue(500)     # 50 kHz, 81,92 ms
+    cfg = ctrl.config_ctrl.to_config()
+    fft = ctrl.fft_ctrl
+    window.actionFFT.setChecked(True)
+    fft.p("Voie analysée").setValue(1)
+    frame = _two_tone_frame(cfg)
+    ctrl.graph_ctrl.show_frame(frame)
+    fft.show_frame(frame)
+    half = frame.n_samples / 2 / cfg.sample_rate
+    peak = _fft_peak(fft)                                    # trame entière : 2 pics
+    assert min(abs(peak - 1000), abs(peak - 5000)) < 100
+    assert fft.zone not in ctrl.graph_ctrl.analog_plot.items
+
+    # zone sur la première moitié : 1 kHz seulement
+    fft.set_zone(0.05 * half, 0.95 * half)
+    assert fft.zone_mode and fft.zone in ctrl.graph_ctrl.analog_plot.items
+    assert abs(_fft_peak(fft) - 1000) < 60
+    assert "zone" in fft.plot.titleLabel.text and "points" in fft.p("Zone").value()
+    n_zone = int(round(0.9 * half * cfg.sample_rate)) + 1
+    assert fft._points[1] == pytest.approx(n_zone, abs=2)
+    # saisie des bornes dans l'arbre : seconde moitié -> 5 kHz
+    fft.p("Début de zone").setValue(1.1 * half)
+    fft.p("Fin de zone").setValue(1.9 * half)
+    assert fft.zone_range() == pytest.approx((1.1 * half, 1.9 * half))
+    assert abs(_fft_peak(fft) - 5000) < 60
+    # zone déplacée à la souris (signal de pyqtgraph) : recalcul regroupé
+    fft.zone.setRegion((0.1 * half, 0.6 * half))
+    assert fft.p("Début de zone").value() == pytest.approx(0.1 * half)
+    assert wait(qapp, lambda: abs(_fft_peak(fft) - 1000) < 60, 2)
+    window.grab().save(str(SHOTS / "logger_fft_zone.png"))
+    # zone trop étroite
+    fft.set_zone(0.1 * half, 0.1 * half + 5 / cfg.sample_rate)
+    assert "trop étroite" in fft.plot.titleLabel.text and fft.amp is None
+    # « Zone = portion affichée »
+    ctrl.graph_ctrl.analog_plot.setXRange(0.2 * half, 0.4 * half, padding=0)
+    fft.p("Zone = portion affichée").activate()
+    assert fft.zone_range() == pytest.approx((0.2 * half, 0.4 * half), rel=1e-3)
+    # retour à la trame affichée : zone retirée du graphique
+    fft.p("Zone de calcul").setValue("Trame affichée")
+    assert fft.zone not in ctrl.graph_ctrl.analog_plot.items
+    assert fft._points[1] == frame.n_samples
+    # FFT désactivée : zone masquée
+    fft.p("Zone de calcul").setValue("Zone sélectionnée")
+    window.actionFFT.setChecked(False)
+    assert fft.zone not in ctrl.graph_ctrl.analog_plot.items
+
+
+def test_fft_zone_live(setup):
+    qapp, sim, window, ctrl = setup
+    fft = ctrl.fft_ctrl
+    window.actionFFT.setChecked(True)
+    cfg = ctrl.config_ctrl.to_config()
+    fft.set_zone(0.0, cfg.frame_duration / 4)
+    window.actionStart.trigger()
+    assert wait(qapp, lambda: fft.amp is not None and ctrl.acq_ctrl.next_index > 3)
+    window.actionStop.trigger()
+    assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
+    assert fft._points[1] == pytest.approx(cfg.samples_per_channel / 4, abs=2)
+
+
+def test_fft_zone_on_scope_record(setup, tmp_path, monkeypatch):
+    """Enregistrement long : FFT de la zone lue dans le fichier, quel que soit le zoom."""
+    import controller.scope_controller as scope_module
+    qapp, sim, window, ctrl = setup
+    n, dt = 120_000, 1e-6
+    t = -0.01 + np.arange(n) * dt
+    y = np.where(np.arange(n) < n // 2, np.sin(2 * np.pi * 1000 * t), np.sin(2 * np.pi * 3000 * t))
+    path = _tek_channel(tmp_path / "tek0000CH1.csv", y)
+    ctrl.scope_ctrl.max_raw = 20_000                        # affichage : enveloppe
+    window.actionFFT.setChecked(True)
+    _open_scope(qapp, ctrl, [path])
+    fft = ctrl.fft_ctrl
+    assert ctrl.graph_ctrl.frame.meta["envelope"]
+    assert "zoomer" in fft.plot.titleLabel.text            # trame affichée : enveloppe
+    reads = []
+    reader = ctrl.scope_ctrl.read_zone
+    monkeypatch.setattr(ctrl.scope_ctrl, "read_zone",
+                        lambda a, b: reads.append((a, b)) or reader(a, b))
+    fft.p("Voie analysée").setValue(0)
+    fft.set_zone(t[70_000], t[110_000])                     # seconde moitié, 40 000 points
+    assert ctrl.graph_ctrl.frame.meta["envelope"]          # affichage toujours en enveloppe
+    from model import spectrum
+    peak = spectrum.find_peaks(fft.freq, fft.amp[:, 0], 1, "hann",
+                               min_frequency=fft.freq[1])[0].frequency
+    assert abs(peak - 3000) < 40 and fft._points[1] == 40_001
+    assert fft.plot.titleLabel.text == "Spectre — zone 40 ms, 40 001 points"
+    fft.p("Fréquence max (Hz)").setValue(10_000)
+    wait(qapp, lambda: False, 0.15)
+    window.grab().save(str(SHOTS / "logger_fft_zone_scope.png"))
+    count = len(reads)
+    # zoom / déplacement : nouvelles portions affichées, FFT de zone inchangée, pas relue
+    ctrl.graph_ctrl.analog_plot.setXRange(t[1000], t[5000], padding=0)
+    ctrl.scope_ctrl.reload()
+    assert len(reads) == count
+    # zone trop large
+    monkeypatch.setattr(scope_module, "MAX_FFT_ZONE_POINTS", 10_000)
+    fft.set_zone(t[0], t[50_000])
+    assert "au plus" in fft.plot.titleLabel.text

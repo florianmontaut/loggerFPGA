@@ -113,6 +113,11 @@ class MainController(QtCore.QObject):
             view.close_guard = self.buffer_ctrl.confirm_quit
         # enregistrements longs d'oscilloscope (CSV Tektronix, HDF5)
         self.scope_ctrl = ScopeController(view, self.graph_ctrl)
+        # FFT sur zone : zone posée sur les voies analogiques ; enregistrement
+        # d'oscilloscope : données brutes de la zone lues dans le fichier
+        self.fft_ctrl.set_zone_plot(self.graph_ctrl.analog_plot)
+        self.fft_ctrl.zone_reader_provider = (
+            lambda: self.scope_ctrl.read_zone if self.scope_ctrl.active else None)
 
         self._connect()
         self._apply_preview(self.config_ctrl.cfg)

@@ -20,13 +20,16 @@ import pyqtgraph as pg
 import pyqtgraph.parametertree as ptree
 from PyQt6 import QtCore, QtGui
 
-from model import spectrum
+from model import measures, spectrum
 from model.config import LoggerConfig
 from model.protocol import Frame
 from ressources import pens
 
 NONE = "(aucune)"
 LINEAR, LOG = "Linéaire", "Logarithmique"
+FRAME, ZONE = "Trame affichée", "Zone sélectionnée"
+MIN_ZONE_POINTS = 16
+ZONE_DELAY_MS = 120                 # recalcul regroupé pendant le déplacement de la zone
 AXIS_SCALES = [LINEAR, LOG]
 SETTINGS_KEY = "fft/axe_frequences"
 
@@ -92,6 +95,16 @@ class FFTController(QtCore.QObject):
              "value": "hann", "tip": "flattop : amplitudes exactes ; hann : bon compromis ; "
                                      "rectangulaire : résolution maximale"},
             {"name": "Retirer le continu", "type": "bool", "value": True},
+            {"name": "Zone de calcul", "type": "list", "limits": [FRAME, ZONE], "value": FRAME,
+             "tip": "Zone sélectionnée : zone verte du graphique des voies analogiques, à "
+                    "déplacer ou à redimensionner (enregistrement d'oscilloscope : données "
+                    "brutes lues dans le fichier, quel que soit le zoom)"},
+            {"name": "Début de zone", "type": "float", "value": 0.0, "suffix": "s",
+             "siPrefix": True, "decimals": 6, "visible": False},
+            {"name": "Fin de zone", "type": "float", "value": 0.0, "suffix": "s",
+             "siPrefix": True, "decimals": 6, "visible": False},
+            {"name": "Zone", "type": "str", "readonly": True, "value": "", "visible": False},
+            {"name": "Zone = portion affichée", "type": "action", "visible": False},
             {"name": "Échelle", "type": "list", "limits": list(spectrum.SCALES),
              "value": "crête"},
             {"name": "Moyennage", "type": "list", "limits": list(spectrum.SpectrumAverager.MODES),
@@ -115,6 +128,33 @@ class FFTController(QtCore.QObject):
         ])
         tree.addParameters(self.params, showTop=True)
         self.params.sigTreeStateChanged.connect(self._on_params_changed)
+        self.p("Zone = portion affichée").sigActivated.connect(self.zone_to_view)
+
+        # zone de calcul (LinearRegionItem, comme la sélection de plage du GLviewer) : posée
+        # sur le graphique des voies analogiques par set_zone_plot
+        self.zone_plot: pg.PlotItem | None = None
+        self.zone = pg.LinearRegionItem(orientation="vertical", swapMode="sort",
+                                        brush=pg.mkBrush(46, 160, 67, 45),
+                                        hoverBrush=pg.mkBrush(46, 160, 67, 80))
+        self.zone.setZValue(15)
+        self.zone_labels = []
+        for line in self.zone.lines:
+            line.setPen(pg.mkPen("#2ea043", width=2))
+            line.setHoverPen(pg.mkPen("#56d364", width=3))
+            # texte mis à jour par _zone_params (préfixes SI : 60 ms plutôt que 0.06 s)
+            self.zone_labels.append(pg.InfLineLabel(line, text="FFT", position=0.06,
+                                                    color="#56d364", fill=(20, 20, 20, 160)))
+        self.zone.sigRegionChanged.connect(self._on_zone_moved)
+        self.zone.sigRegionChangeFinished.connect(self._apply_zone)
+        self._zone_timer = QtCore.QTimer(self)
+        self._zone_timer.setSingleShot(True)
+        self._zone_timer.timeout.connect(self._apply_zone)
+        self._zone_ready = False             # zone placée au moins une fois
+        self._syncing_zone = False
+        # () -> lecteur(t0, t1) des données brutes (enregistrement d'oscilloscope) ou None
+        self.zone_reader_provider = lambda: None
+        self._zone_key = None                # zone déjà calculée (lecteur : pas de relecture)
+        self._points = None                  # (fréquence d'échantillonnage, points) calculés
 
         self.readout = pg.LabelItem(justify="right")
         self.plot = pg.PlotItem(axisItems={"bottom": FrequencyAxis("bottom")})
@@ -212,12 +252,104 @@ class FFTController(QtCore.QObject):
         selector.setValue(current if current in choices.values() else next(iter(choices.values())))
         self._apply_x_range()            # en log comme en linéaire
         self._reset_average()
+        self._zone_key = None
+        self._points = None
+        self._configure_zone(cfg)
         self._update_labels()
 
     def set_enabled(self, enabled: bool):
         self.enabled = enabled
         if enabled and self.frame is None and self.cfg is not None:
             self._reset_average()
+        self._show_zone()
+        if enabled and self.frame is not None:
+            self._zone_key = None
+            self.show_frame(self.frame)
+
+    # ------------------------------------------------------------------ zone de calcul
+    @property
+    def zone_mode(self) -> bool:
+        return self.p("Zone de calcul").value() == ZONE
+
+    def set_zone_plot(self, plot: pg.PlotItem):
+        self.zone_plot = plot
+
+    def set_zone(self, t0: float, t1: float):
+        """Zone de calcul [t0, t1] (s) ; passe en mode « Zone sélectionnée »."""
+        self._zone_ready = True
+        self._syncing_zone = True
+        try:
+            self.zone.setRegion((t0, t1))
+        finally:
+            self._syncing_zone = False
+        self._zone_params()
+        if not self.zone_mode:
+            self.p("Zone de calcul").setValue(ZONE)          # -> _on_params_changed
+        else:
+            self._apply_zone()
+
+    def zone_range(self) -> tuple[float, float]:
+        t0, t1 = self.zone.getRegion()
+        return float(t0), float(t1)
+
+    def zone_to_view(self):
+        """Zone = portion du graphique actuellement affichée."""
+        if self.zone_plot is not None:
+            self.set_zone(*self.zone_plot.vb.viewRange()[0])
+
+    def _configure_zone(self, cfg: LoggerConfig):
+        span, t0 = cfg.frame_duration, cfg.time_origin
+        self._syncing_zone = True              # setBounds peut déplacer la zone
+        try:
+            self.zone.setBounds((t0, t0 + span))
+        finally:
+            self._syncing_zone = False
+        lo, hi = self.zone_range()
+        if not self._zone_ready or not (t0 <= lo < hi <= t0 + span):
+            self._syncing_zone = True
+            self.zone.setRegion((t0 + 0.25 * span, t0 + 0.75 * span))
+            self._syncing_zone = False
+            self._zone_params()
+
+    def _show_zone(self):
+        plot = self.zone_plot
+        if plot is None:
+            return
+        show = self.enabled and self.zone_mode
+        present = self.zone in plot.items
+        if show and not present:
+            plot.addItem(self.zone, ignoreBounds=True)
+        elif not show and present:
+            plot.removeItem(self.zone)
+        for name in ("Début de zone", "Fin de zone", "Zone", "Zone = portion affichée"):
+            self.p(name).setOpts(visible=self.zone_mode)
+
+    def _zone_params(self):
+        """Champs Début / Fin de zone recopiés depuis la zone."""
+        t0, t1 = self.zone_range()
+        for label, value in zip(self.zone_labels, (t0, t1)):
+            label.setFormat(f"FFT {measures.si(value, 's', 4)}")
+        self._syncing_zone = True
+        try:
+            with self.params.treeChangeBlocker():
+                self.p("Début de zone").setValue(t0)
+                self.p("Fin de zone").setValue(t1)
+        finally:
+            self._syncing_zone = False
+
+    def _on_zone_moved(self):
+        if self._syncing_zone:
+            return
+        self._zone_ready = True
+        self._zone_params()
+        self._zone_timer.start(ZONE_DELAY_MS)
+
+    def _apply_zone(self):
+        """Zone modifiée : moyenne recommencée, spectre recalculé sur la dernière trame."""
+        self._zone_timer.stop()
+        self._zone_key = None
+        if self.enabled and self.frame is not None:
+            self.show_frame(self.frame)
 
     def set_paused(self, paused: bool):
         self.paused = paused
@@ -235,7 +367,8 @@ class FFTController(QtCore.QObject):
     def reset(self):
         """Recommence la moyenne (ou le maximum) à partir de la dernière trame."""
         self._reset_average()
-        if self.frame is not None:
+        self._zone_key = None
+        if self.frame is not None and self.enabled:
             self._compute(self.frame)
 
     def _reset_average(self):
@@ -251,6 +384,8 @@ class FFTController(QtCore.QObject):
 
     def _resolution_source(self) -> tuple[float, int]:
         """(fréquence d'échantillonnage, points) du spectre : trame affichée, sinon config."""
+        if self._points is not None:                  # dernier spectre calculé
+            return self._points
         frame = self.frame
         if frame is not None and not frame.meta.get("envelope") and frame.n_samples > 1:
             return frame.sample_rate, frame.n_samples
@@ -261,25 +396,69 @@ class FFTController(QtCore.QObject):
         self.frame = frame
         if not self.enabled or not frame.analog_signals:
             return
+        reader = self.zone_reader_provider() if self.zone_mode else None
+        key = (self.zone_range(), id(reader)) if reader is not None else None
+        if key is not None and key == self._zone_key and self.amp is not None:
+            return              # zone lue dans le fichier : indépendante du zoom affiché
         self._reset_average()
-        if frame.meta.get("envelope"):
-            # enveloppe min/max d'un enregistrement long : pas un signal échantillonné
+        self._compute(frame)
+
+    def _data(self, frame: Frame):
+        """
+        (voies (n, k), fréquence, indices des voies, texte de la zone) à analyser, ou un
+        message si le spectre ne peut pas être calculé.
+        """
+        if not self.zone_mode:
+            if frame.meta.get("envelope"):
+                return ("zoomer jusqu'aux données brutes, ou choisir une zone de calcul")
+            return frame.analog, frame.sample_rate, list(frame.analog_signals), ""
+        t0, t1 = self.zone_range()
+        reader = self.zone_reader_provider()
+        if reader is not None:               # enregistrement d'oscilloscope : fichier
+            try:
+                data, fs, signals = reader(t0, t1)
+            except ValueError as exc:
+                return str(exc)
+        else:
+            if frame.meta.get("envelope"):
+                return "zoomer jusqu'aux données brutes"
+            fs, n = frame.sample_rate, frame.n_samples
+            end = frame.t0 + (n - 1) / fs
+            if t1 < frame.t0 or t0 > end:
+                return "zone hors de la trame"
+            i0 = measures.nearest_index(t0, fs, n, frame.t0)
+            i1 = measures.nearest_index(t1, fs, n, frame.t0) + 1
+            data, signals = frame.analog[i0:i1], list(frame.analog_signals)
+        points = data.shape[0]
+        if points < MIN_ZONE_POINTS:
+            return f"zone trop étroite ({points} points, {MIN_ZONE_POINTS} au moins)"
+        text = f"zone {measures.si(points / fs, 's', 4)}, " + f"{points:,} points".replace(",", " ")
+        return data, fs, signals, text
+
+    def _compute(self, frame: Frame):
+        data = self._data(frame)
+        if isinstance(data, str):
             self.amp = None
+            self._points = None
             for curve in self.curves.values():
                 curve.setData([], [])
             self._clear_peaks()
-            self.plot.setTitle("Spectre — zoomer jusqu'aux données brutes pour le calculer")
+            self.plot.setTitle(f"Spectre — {data}")
+            self.p("Zone").setValue(data)
             return
-        self.plot.setTitle("Spectre")
-        self._compute(frame)
-
-    def _compute(self, frame: Frame):
-        freq, amp = spectrum.amplitude_spectrum(frame.analog, frame.sample_rate,
-                                                self.p("Fenêtre").value(),
+        analog, fs, signals, text = data
+        freq, amp = spectrum.amplitude_spectrum(analog, fs, self.p("Fenêtre").value(),
                                                 self.p("Retirer le continu").value())
         self.freq = freq
         self.amp = self.averager.add(amp)
-        self.signals = list(frame.analog_signals)
+        self.signals = signals
+        self._points = (fs, analog.shape[0])
+        if self.zone_mode:
+            reader = self.zone_reader_provider()
+            self._zone_key = (self.zone_range(), id(reader)) if reader is not None else None
+            self.p("Zone").setValue(text)
+        self.plot.setTitle(f"Spectre — {text}" if text else "Spectre")
+        self._update_labels()
         self._dirty = True
 
     def _on_params_changed(self, _param, changes):
@@ -289,7 +468,17 @@ class FFTController(QtCore.QObject):
         if not names:
             return                       # mise à jour des mesures affichées
         self.p("Nombre de trames").setOpts(visible=self.p("Moyennage").value() == "moyenne")
+        if names & {"Début de zone", "Fin de zone"} and not self._syncing_zone:
+            t0, t1 = self.p("Début de zone").value(), self.p("Fin de zone").value()
+            if t1 > t0:
+                self.set_zone(t0, t1)
+        if "Zone de calcul" in names:
+            if self.zone_mode and not self._zone_ready:
+                self.zone_to_view()                     # première fois : portion affichée
+            self._show_zone()
+            self._apply_zone()
         if names & {"Fenêtre", "Retirer le continu", "Moyennage", "Nombre de trames"}:
+            self._zone_key = None
             self.reset()
         if "Axe des fréquences" in names:
             self._sync_log_x()
