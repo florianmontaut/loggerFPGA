@@ -944,3 +944,87 @@ def test_progress_dialog_cancel(setup, tmp_path):
     assert wait(qapp, lambda: scope.progress_dialog is None)
     assert not scope.active and not (tmp_path / "long.h5").exists()
     assert "annulée" in window.statusBar().currentMessage()
+
+
+# ------------------------------------------------------------------ fichiers récents
+
+def test_recent_files_and_last_directory(setup, tmp_path, monkeypatch):
+    qapp, sim, window, ctrl = setup
+    recent = ctrl.recent_ctrl
+    seen_dirs = []
+
+    def chooser(result):
+        def choose(parent, caption, directory, *args, **kwargs):
+            seen_dirs.append(directory)
+            return result
+        return choose
+
+    # enregistrement du logger rouvert depuis un dossier : il devient le dernier répertoire
+    logger_dir = tmp_path / "logger"
+    logger_dir.mkdir()
+    path, _ = _recording(logger_dir, [1, 4, 6, 15], [1, 2])
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileNames", chooser(([path], "")))
+    window.actionOpenRecording.trigger()
+    assert recent.entries[0] == {"kind": "logger", "paths": [path]}
+    assert recent.last_dir == str(logger_dir)
+
+    # enregistrement d'oscilloscope : le .h5 est retenu, le dossier des CSV est visité
+    scope_dir = tmp_path / "dpo"
+    scope_dir.mkdir()
+    ch1 = _tek_channel(scope_dir / "tek0000CH1.csv", np.zeros(5000))
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileNames", chooser(([ch1], "")))
+    window.actionOpenRecording.trigger()
+    assert ctrl.scope_ctrl.wait_import()
+    assert wait(qapp, lambda: ctrl.scope_ctrl.active and recent.entries[0]["kind"] == "scope")
+    assert seen_dirs[-1] == str(logger_dir)             # ouverte sur le dernier répertoire
+    assert recent.entries[0]["paths"] == [str(scope_dir / "tek0000CH1.h5")]
+    assert recent.last_dir == str(scope_dir)
+
+    # ajout de voies depuis un autre dossier : la boîte s'ouvre sur le dernier répertoire
+    other_dir = tmp_path / "voie2"
+    other_dir.mkdir()
+    ch2 = _tek_channel(other_dir / "tek0000CH2.csv", np.ones(5000))
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileNames", chooser(([ch2], "")))
+    window.actionAddScopeChannels.trigger()
+    assert seen_dirs[-1] == str(scope_dir)
+    assert ctrl.scope_ctrl.wait_import()
+    assert wait(qapp, lambda: ctrl.scope_ctrl.active and len(ctrl.scope_ctrl.record.names) == 2)
+    assert recent.last_dir == str(other_dir)
+    assert len([e for e in recent.entries if e["kind"] == "scope"]) == 1   # pas de doublon
+
+    # configuration : boîte d'ouverture sur le dernier répertoire, entrée « configuration »
+    cfg_path = str(other_dir / "banc.json")
+    ctrl.config_ctrl.read_tree().save(cfg_path)
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName", chooser((cfg_path, "")))
+    window.actionLoadConfig.trigger()
+    assert seen_dirs[-1] == str(other_dir)
+    assert recent.entries[0] == {"kind": "config", "paths": [cfg_path]}
+
+    # menu Fichiers récents : rouvre l'enregistrement du logger (dans la mémoire tampon)
+    labels = [a.text() for a in window.menuRecent.actions() if not a.isSeparator()]
+    assert labels[:3] == ["&1  banc.json    (configuration)",
+                          "&2  tek0000CH1.h5    (oscilloscope)",
+                          "&3  enr.csv    (logger)"]
+    window.menuRecent.actions()[2].trigger()
+    assert not ctrl.scope_ctrl.active
+    assert [f.index for f in ctrl.buffer_ctrl.buffer] == [1, 2]
+    # rouvert : remonte en tête de liste
+    labels = [a.text() for a in window.menuRecent.actions() if not a.isSeparator()]
+    assert labels[0] == "&1  enr.csv    (logger)"
+    # … puis l'enregistrement d'oscilloscope, avec ses deux voies
+    [action] = [a for a in window.menuRecent.actions() if "tek0000CH1.h5" in a.text()]
+    action.trigger()
+    assert wait(qapp, lambda: ctrl.scope_ctrl.active)
+    assert ctrl.scope_ctrl.record.names == ["CH1", "CH2"]
+
+
+def test_recent_file_missing(setup, tmp_path, monkeypatch):
+    qapp, sim, window, ctrl = setup
+    shown = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a: shown.append(a[2]))
+    path, _ = _recording(tmp_path, [1, 4, 6, 15], [1])
+    assert ctrl.open_recording(path)
+    os.remove(path)
+    window.menuRecent.actions()[0].trigger()
+    assert "introuvable" in shown[-1] and path in shown[-1]
+    assert ctrl.recent_ctrl.entries == []

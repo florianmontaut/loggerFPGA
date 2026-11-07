@@ -108,6 +108,9 @@ class ProgressDialog(QtWidgets.QDialog):
 class ScopeController(QtCore.QObject):
 
     opened = QtCore.pyqtSignal(object)            # LoggerConfig de l'enregistrement
+    # chargement réussi : workspace .h5 ouvert, fichiers choisis par l'utilisateur
+    # (fichiers récents, dernier répertoire)
+    loaded = QtCore.pyqtSignal(str, list)
     closed = QtCore.pyqtSignal()
     display_frame = QtCore.pyqtSignal(object)     # portion relue (Frame)
     message = QtCore.pyqtSignal(str)
@@ -123,6 +126,7 @@ class ScopeController(QtCore.QObject):
         self._syncing = False
         self._window_key = None
         self._after_import = None           # ajout de voies : (portion affichée, voies)
+        self._sources = None                # fichiers choisis, signalés par loaded
         self._failed_reopen = None          # ajout de voies : enregistrement à rouvrir
         self.max_raw = MAX_RAW_POINTS     # au-delà : enveloppe min/max
 
@@ -153,11 +157,13 @@ class ScopeController(QtCore.QObject):
     def open(self, paths: list[str]) -> bool:
         """CSV Tektronix (un ou plusieurs) ou .h5. Import en arrière-plan si besoin."""
         paths = [os.path.abspath(p) for p in paths]
+        self._sources = None
         h5 = [p for p in paths if os.path.splitext(p)[1].lower() in (".h5", ".hdf5")]
         if h5:
             if len(paths) > 1:
                 self._error("Ouvrir un seul fichier .h5 à la fois")
                 return False
+            self._sources = paths
             return self._open_h5(h5[0])
         not_tek = [os.path.basename(p) for p in paths if not is_tek_csv(p)]
         if not_tek:
@@ -167,7 +173,9 @@ class ScopeController(QtCore.QObject):
         if os.path.exists(h5_path) and all(os.path.getmtime(h5_path) >= os.path.getmtime(p)
                                            for p in paths):
             self.message.emit(f"Conversion existante réutilisée : {os.path.basename(h5_path)}")
+            self._sources = paths
             return self._open_h5(h5_path)
+        self._sources = paths
         self._start_import(paths, h5_path)
         return True
 
@@ -191,6 +199,7 @@ class ScopeController(QtCore.QObject):
         self.close(emit=False)              # fichier libéré pendant l'écriture
         self._after_import = (view, before)
         self._failed_reopen = target
+        self._sources = paths
         self._run(lambda progress, cancelled: (
             append_to_workspace(target, paths, progress=progress, cancelled=cancelled),
             target)[1], "Ajout des voies...")
@@ -239,6 +248,7 @@ class ScopeController(QtCore.QObject):
         reopen = getattr(self, "_failed_reopen", None)
         appended = getattr(self, "_after_import", None)
         self._after_import = self._failed_reopen = None
+        self._sources = None                # rien de nouveau n'a été chargé
         if message:
             self._error(message)
         else:
@@ -278,6 +288,9 @@ class ScopeController(QtCore.QObject):
             self.region.setRegion(view_range)
             self._syncing = False
         self.reload()
+        sources, self._sources = self._sources, None
+        if sources:
+            self.loaded.emit(record.path, sources)
         return True
 
     def _config(self, record: ScopeRecord) -> LoggerConfig:
