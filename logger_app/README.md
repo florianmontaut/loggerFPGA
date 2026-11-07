@@ -82,6 +82,7 @@ logger_app/
 │   ├── formula/                   moteur de formules du GLviewer (copie, voir son __init__)
 │   ├── math_channels.py           voies calculées : fonctions temps réel, unités, évaluation
 │   ├── loader.py                  relecture d'un enregistrement (.csv, .npz)
+│   ├── pattern.py                 export d'un motif : sélection, décimation, formats
 │   ├── scope_record.py            oscilloscope : import CSV Tektronix -> HDF5, lecture par zoom
 │   ├── spectrum.py                FFT : fenêtres, amplitudes calibrées, moyennage, pics, THD
 │   └── measures.py                mesures entre deux curseurs (Δt, Δy, min, max, moyenne, efficace)
@@ -94,6 +95,7 @@ logger_app/
 │   ├── fft_controller.py          spectre temps réel et réglages FFT
 │   ├── scope_controller.py        mode enregistrement long (vue d'ensemble, zoom, import)
 │   ├── recent_controller.py       fichiers récents, dernier répertoire visité
+│   ├── pattern_controller.py      export d'un motif (zone, points marqués, copie)
 │   ├── math_controller.py         groupe « Voies calculées » (formules, état)
 │   ├── buffer_controller.py       onglet Trames : mémoire tampon, relecture, sauvegarde, confirmations
 │   ├── cursor_controller.py       curseurs de mesure (t1/t2, y1/y2) et mesures associées
@@ -101,6 +103,7 @@ logger_app/
 │   └── main_controller.py         câblage des contrôleurs et de la vue
 ├── view/main_window.py            fenêtre : barre d'outils, arbre, paramètres, graphiques, barre d'état
 ├── view/detached_window.py        fenêtre d'un graphique déporté
+├── view/pattern_dialog.py         fenêtre « Exporter un motif »
 ├── ressources/pens.py             couleurs des voies (palette tab20 du GLviewer)
 ├── ressources/zoom.py             limites de zoom des graphiques
 ├── tools/fpga_simulator.py        simulateur du FPGA (UDP local)
@@ -228,6 +231,46 @@ trame,temps_s,I_HV (V),V_PH1_INV2 (V),K_HV,K_PRE,L2,...
 
 Les trames enregistrées par ce bouton sont marquées ✓ dans la mémoire tampon : elles ne
 sont pas proposées à nouveau avant de quitter.
+
+### Exporter un motif (table de points pour un simulateur)
+
+Pour reprendre une forme d'onde mesurée dans PLECS, PSPICE, LTspice ou un tableur :
+**clic droit sur le graphique** des voies analogiques (ou des voies calculées) ›
+**Exporter un motif...**
+
+* Une **zone orange** (`LinearRegionItem`, comme la zone FFT) apparaît au milieu de la
+  portion affichée. On la déplace, on tire ses bornes, ou on saisit *Début* / *Fin* dans
+  la fenêtre *Exporter un motif*, qui reste ouverte pendant ce réglage.
+* Les **points exportés sont marqués** sur la courbe de la voie choisie (points orange) :
+  on voit directement l'effet de la décimation.
+* **Voie** : analogique, calculée ou logique (créneau 0/1, utile pour une commande PWM).
+* **Points max** : 2 000 au plus. Au-delà, l'export garde 1 point sur N, ainsi que le
+  premier et le dernier échantillon de la zone. La fenêtre indique le nombre
+  d'échantillons de la zone, le pas et le nombre de points exportés.
+* **Formats** :
+
+  | Format | Contenu | Pour |
+  |---|---|---|
+  | Colonnes (tabulation) | `t (s)⇥voie (unité)` puis une ligne par point | tableur, PLECS (copier-coller) |
+  | CSV (;) | idem, séparateur `;` | tableur |
+  | PWL (PSPICE, LTspice) | `t y` par ligne, sans en-tête | source `PWL(file=...)` |
+  | Vecteurs (PLECS, MATLAB) | `t = [...];` et `voie = [...];` | champs d'une *1D Look-Up Table* |
+
+  *Temps relatif au début du motif* (coché par défaut) : le motif commence à t = 0.
+  *Virgule décimale* : pour un tableur français (sans effet sur PWL et Vecteurs, qui
+  exigent le point).
+* **Copier** met le texte dans le presse-papiers. **Enregistrer...** l'écrit dans un
+  fichier, proposé dans le dernier répertoire. Un aperçu montre les premières lignes.
+* **Enregistrement d'oscilloscope** : comme pour la FFT sur zone, le motif est lu en
+  données brutes dans le fichier, quel que soit le zoom. On peut donc choisir le motif
+  sur l'enveloppe de tout l'enregistrement. Les voies calculées sont évaluées sur la
+  zone : une intégrale y part du début de la zone.
+* Pendant un glisser, la mise à jour se fait au relâchement. En direct (logger), le
+  motif suit la trame affichée : *Figer* (F8) le fige.
+* Fermer la fenêtre retire la zone et les points du graphique.
+
+![motif sur un enregistrement d'oscilloscope](docs/capture_motif.png)
+![fenêtre Exporter un motif](docs/capture_motif_fenetre.png)
 
 ### Limites de zoom
 
@@ -578,7 +621,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-206 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, acquisition complète contre le
+211 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes

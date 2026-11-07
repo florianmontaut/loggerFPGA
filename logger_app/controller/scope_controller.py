@@ -396,6 +396,19 @@ class ScopeController(QtCore.QObject):
                                 for name in self.record.names]) if n > 0 else np.empty((0, 1))
         return data, self.record.sample_rate, list(range(len(self.record.names)))
 
+    def read_zone_frame(self, t0: float, t1: float) -> Frame:
+        """
+        Trame des données brutes de [t0, t1] (toutes les voies), lue dans le fichier quel
+        que soit le zoom : export d'un motif. ValueError au-delà de MAX_FFT_ZONE_POINTS.
+        """
+        data, fs, signals = self.read_zone(t0, t1)
+        start = self.record.index_of(t0)
+        frame = Frame(index=0, signals=signals, raw=np.empty((data.shape[0], 0), np.int16),
+                      analog=data, logic=None, sample_rate=fs,
+                      t0=self.record.time_of(start))
+        frame.meta["scope"] = self.record.path
+        return frame
+
     def show_all(self):
         if self.record is not None:
             self.graph.analog_plot.setXRange(self.record.t0,
