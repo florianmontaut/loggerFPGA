@@ -29,7 +29,9 @@ NONE = "(aucune)"
 LINEAR, LOG = "Linéaire", "Logarithmique"
 FRAME, ZONE = "Trame affichée", "Zone sélectionnée"
 MIN_ZONE_POINTS = 16
-ZONE_DELAY_MS = 120                 # recalcul regroupé pendant le déplacement de la zone
+# FFT sur zone : pendant un glisser à la souris, aucun calcul (un seul au relâchement) ;
+# autres changements (saisie des bornes...) : calcul ZONE_DELAY_MS après le dernier
+ZONE_DELAY_MS = 100
 AXIS_SCALES = [LINEAR, LOG]
 SETTINGS_KEY = "fft/axe_frequences"
 
@@ -145,15 +147,16 @@ class FFTController(QtCore.QObject):
             self.zone_labels.append(pg.InfLineLabel(line, text="FFT", position=0.06,
                                                     color="#56d364", fill=(20, 20, 20, 160)))
         self.zone.sigRegionChanged.connect(self._on_zone_moved)
-        self.zone.sigRegionChangeFinished.connect(self._apply_zone)
+        self.zone.sigRegionChangeFinished.connect(self._on_zone_released)
         self._zone_timer = QtCore.QTimer(self)
         self._zone_timer.setSingleShot(True)
-        self._zone_timer.timeout.connect(self._apply_zone)
+        self._zone_timer.timeout.connect(lambda: self._apply_zone(force=False))
         self._zone_ready = False             # zone placée au moins une fois
         self._syncing_zone = False
         # () -> lecteur(t0, t1) des données brutes (enregistrement d'oscilloscope) ou None
         self.zone_reader_provider = lambda: None
         self._zone_key = None                # zone déjà calculée (lecteur : pas de relecture)
+        self._zone_done = None               # zone du dernier spectre (pas de calcul en double)
         self._points = None                  # (fréquence d'échantillonnage, points) calculés
 
         self.readout = pg.LabelItem(justify="right")
@@ -253,6 +256,7 @@ class FFTController(QtCore.QObject):
         self._apply_x_range()            # en log comme en linéaire
         self._reset_average()
         self._zone_key = None
+        self._zone_done = None
         self._points = None
         self._configure_zone(cfg)
         self._update_labels()
@@ -337,16 +341,39 @@ class FFTController(QtCore.QObject):
         finally:
             self._syncing_zone = False
 
+    def zone_dragging(self) -> bool:
+        """Zone ou borne en cours de glisser à la souris (bouton encore enfoncé)."""
+        return bool(getattr(self.zone, "moving", False)
+                    or any(getattr(line, "moving", False) for line in self.zone.lines))
+
     def _on_zone_moved(self):
         if self._syncing_zone:
             return
         self._zone_ready = True
-        self._zone_params()
-        self._zone_timer.start(ZONE_DELAY_MS)
+        self._zone_params()                  # bornes affichées en continu
+        if self.zone_dragging():
+            self._zone_timer.stop()          # calcul au relâchement seulement
+        else:
+            self._zone_timer.start(ZONE_DELAY_MS)
 
-    def _apply_zone(self):
-        """Zone modifiée : moyenne recommencée, spectre recalculé sur la dernière trame."""
+    def _on_zone_released(self):
+        """
+        Fin du glisser : un seul calcul. setRegion() par programme émet aussi ce signal :
+        ignoré pendant une saisie des bornes (calcul après le délai) ou un glisser.
+        """
+        if self._syncing_zone or self.zone_dragging():
+            return
+        self._apply_zone(force=False)
+
+    def _apply_zone(self, force: bool = True):
+        """
+        Zone modifiée : moyenne recommencée, spectre recalculé sur la dernière trame.
+        force=False : rien si le spectre porte déjà sur cette zone (relâchement après le
+        délai, minuteur et relâchement rapprochés).
+        """
         self._zone_timer.stop()
+        if not force and self._zone_done == self.zone_range():
+            return
         self._zone_key = None
         if self.enabled and self.frame is not None:
             self.show_frame(self.frame)
@@ -445,6 +472,8 @@ class FFTController(QtCore.QObject):
             self._clear_peaks()
             self.plot.setTitle(f"Spectre — {data}")
             self.p("Zone").setValue(data)
+            if self.zone_mode:
+                self._zone_done = self.zone_range()
             return
         analog, fs, signals, text = data
         freq, amp = spectrum.amplitude_spectrum(analog, fs, self.p("Fenêtre").value(),
@@ -456,22 +485,32 @@ class FFTController(QtCore.QObject):
         if self.zone_mode:
             reader = self.zone_reader_provider()
             self._zone_key = (self.zone_range(), id(reader)) if reader is not None else None
+            self._zone_done = self.zone_range()
             self.p("Zone").setValue(text)
         self.plot.setTitle(f"Spectre — {text}" if text else "Spectre")
         self._update_labels()
         self._dirty = True
 
     def _on_params_changed(self, _param, changes):
-        measures = set(self.p("Mesures").children())
+        measure_params = set(self.p("Mesures").children())       # (ne pas masquer le module)
         names = {param.name() for param, kind, _ in changes
-                 if kind == "value" and param not in measures}
+                 if kind == "value" and param not in measure_params}
         if not names:
             return                       # mise à jour des mesures affichées
         self.p("Nombre de trames").setOpts(visible=self.p("Moyennage").value() == "moyenne")
         if names & {"Début de zone", "Fin de zone"} and not self._syncing_zone:
             t0, t1 = self.p("Début de zone").value(), self.p("Fin de zone").value()
             if t1 > t0:
-                self.set_zone(t0, t1)
+                # saisie au clavier : zone déplacée tout de suite, calcul après le délai
+                self._zone_ready = True
+                self._syncing_zone = True
+                try:
+                    self.zone.setRegion((t0, t1))
+                finally:
+                    self._syncing_zone = False
+                for label, value in zip(self.zone_labels, self.zone_range()):
+                    label.setFormat(f"FFT {measures.si(value, 's', 4)}")
+                self._zone_timer.start(ZONE_DELAY_MS)
         if "Zone de calcul" in names:
             if self.zone_mode and not self._zone_ready:
                 self.zone_to_view()                     # première fois : portion affichée
