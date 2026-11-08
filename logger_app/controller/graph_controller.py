@@ -261,10 +261,13 @@ class LiveGraphController(QtCore.QObject):
         t = frame.time()
         # limites de zoom avant les données : l'échelle automatique les respecte
         self._update_y_limits()
+        # voies de bases de temps différentes : trous (NaN) hors de l'étendue d'une voie
+        gaps = bool(frame.meta.get("gaps"))
         for j, sig in enumerate(frame.analog_signals):
             curve = self.curves.get(("A", sig))
             if curve is not None:
-                curve.setData(t, frame.analog[:, j], skipFiniteCheck=True)
+                curve.setData(t, frame.analog[:, j], skipFiniteCheck=not gaps,
+                              connect="finite" if gaps else "all")
         if frame.logic is not None:
             for bit in range(16):
                 curve = self.curves.get(("L", bit))
@@ -278,7 +281,7 @@ class LiveGraphController(QtCore.QObject):
                 if curve is None:
                     continue
                 if item.name in results:
-                    curve.setData(t, results[item.name])
+                    curve.setData(t, results[item.name], connect="finite" if gaps else "all")
                 else:
                     curve.setData([], [])
             self.math_errors.emit(errors)

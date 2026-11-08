@@ -27,8 +27,23 @@ lisible par les deux outils :
     /signals/<nom>/overview/min, max            vue d'ensemble (~4096 colonnes)
     /signals/<nom>/pyramid/level_XX/min, max    pyramide min/max (attr samples_per_bin)
 
+    attrs de /signals/<nom> (ajoutés par le logger) : sample_interval, time_origin, unit
+        base de temps propre à la voie ; à défaut, celle du fichier
+
+Bases de temps différentes (voies d'acquisitions différentes, ou PicoScope : début décalé
+par la stabilisation du déclenchement, longueurs différentes après filtrage) : chaque voie
+garde ses échantillons et sa base de temps dans le fichier ; la lecture les rééchantillonne
+sur une grille commune (celle de la voie la plus fine présente dans la portion lue), NaN
+hors de l'étendue d'une voie.
+
 Lecture (ScopeRecord.read_window) : données brutes si la portion demandée compte au plus
 `max_raw` points par voie, sinon enveloppe min/max tirée du niveau de pyramide adapté.
+
+Export HDF5 de PicoScope 7 (import_picoscope -> workspace) :
+    un groupe par voie, un dataset 1-D (float32) par forme d'onde ;
+    /Abscissa : table (Path, StartValue, Interval), attribut AbscissaUnit (s ou Hz) ;
+    t(i) = StartValue + i * Interval, propre à chaque forme d'onde.
+Aussi : datasets portant des attributs start (s depuis 1970) et interval (s).
 """
 from __future__ import annotations
 
@@ -197,8 +212,6 @@ def import_tek_csv(paths: list[str], h5_path: str, names: list[str] | None = Non
     names = list(names) if names else default_names(paths, headers)
     if len(names) != sum(h.n_signals for h in headers):
         raise ScopeError("Nombre de noms différent du nombre de voies")
-    ref = headers[0]
-    dt = ref.value("sample_interval")
     sizes = [os.path.getsize(p) for p in paths]
     total = float(sum(sizes)) or 1.0
     report = progress or (lambda f, t: None)
@@ -209,32 +222,23 @@ def import_tek_csv(paths: list[str], h5_path: str, names: list[str] | None = Non
         with h5py.File(tmp_path, "w") as h5:
             _write_attrs(h5, headers, paths)
             signals = h5.create_group("signals")
-            length = None
+            length = dt = None
             done = 0.0
             column = 0
             for path, header, size in zip(paths, headers, sizes):
                 own = names[column:column + header.n_signals]
                 column += header.n_signals
-                n, file_dt = _import_file(path, header, own, signals, length, dtype,
-                                          chunk_rows, lambda f: report((done + f * size) / total
-                                                                       * 0.8, f"Lecture de "
-                                                                       f"{os.path.basename(path)}"),
-                                          stop)
-                if length is None:
-                    length = n
-                    dt = dt or file_dt
-                elif n != length:
-                    raise ScopeError(f"{os.path.basename(path)} : {n} points, {length} "
-                                     f"attendus (mêmes instants pour tous les fichiers)")
-                if abs(header.first_time - ref.first_time) > abs(dt or 0):
-                    raise ScopeError(f"{os.path.basename(path)} commence à "
-                                     f"{header.first_time} s, {ref.first_time} s attendu")
+                n, own_dt = _import_tek_signals(
+                    path, header, own, signals, dtype, chunk_rows,
+                    lambda f: report((done + f * size) / total * 0.8,
+                                     f"Lecture de {os.path.basename(path)}"), stop)
+                if length is None:            # attributs du fichier : premier CSV
+                    length, dt = n, own_dt
                 done += size
-            if not dt or dt <= 0:
-                raise ScopeError("Intervalle d'échantillonnage introuvable")
             h5.attrs["sample_interval"] = float(dt)
             h5.attrs["record_length_imported"] = int(length)
             h5.attrs["signal_count"] = len(names)
+            _mark_timebases(h5)
             for k, name in enumerate(names):
                 report(0.8 + 0.2 * k / len(names), f"Pyramide de {name}")
                 if stop():
@@ -262,12 +266,13 @@ def _unique(name: str, used: set) -> str:
 def append_to_workspace(h5_path: str, sources: list[str],
                         progress: Callable[[float, str], None] | None = None,
                         cancelled: Callable[[], bool] | None = None,
-                        chunk_rows: int = CSV_CHUNK_ROWS, dtype=np.float32) -> list[str]:
+                        chunk_rows: int = CSV_CHUNK_ROWS, dtype=np.float32,
+                        waveforms: dict | None = None) -> list[str]:
     """
-    Ajoute à un workspace HDF5 les voies de CSV Tektronix ou d'autres workspaces .h5
-    (un oscilloscope Tektronix écrit un CSV par voie). Les voies ajoutées doivent avoir le
-    même intervalle d'échantillonnage, le même nombre de points et commencer au même
-    instant. Un nom déjà pris reçoit un suffixe (_2...).
+    Ajoute à un workspace HDF5 les voies de CSV Tektronix, d'autres workspaces .h5 ou
+    d'exports HDF5 PicoScope (waveforms : forme d'onde choisie par fichier, 0 par défaut).
+    Chaque voie garde sa base de temps (échantillonnage, début, nombre de points). Un nom
+    déjà pris reçoit un suffixe (_2...).
 
     L'ajout se fait dans une copie, qui remplace le fichier seulement en cas de succès :
     annulation, erreur ou coupure laissent le workspace intact. Renvoie les noms ajoutés.
@@ -292,12 +297,8 @@ def append_to_workspace(h5_path: str, sources: list[str],
     try:
         with h5py.File(tmp_path, "a") as h5:
             signals = h5["signals"]
-            dt = float(h5.attrs.get("sample_interval", 0.0) or 0.0)
-            if dt <= 0:
-                raise ScopeError("Intervalle d'échantillonnage absent de l'enregistrement")
             present = [n for n in signals if "raw" in signals[n] and "value" in signals[n]["raw"]]
-            length = min(signals[n]["raw/value"].shape[0] for n in present)
-            t0 = float(h5.attrs["time_origin"]) if "time_origin" in h5.attrs else None
+            _fill_timebases(h5)               # voies existantes : base de temps explicite
             used = set(signals)
 
             # CSV Tektronix
@@ -308,25 +309,24 @@ def append_to_workspace(h5_path: str, sources: list[str],
             done, column = 0.0, 0
             for path, header, size in zip(csvs, headers, sizes):
                 label = os.path.basename(path)
-                file_dt = header.value("sample_interval")
-                if isinstance(file_dt, (int, float)) and abs(file_dt - dt) > 1e-9 * dt:
-                    raise ScopeError(f"{label} : échantillonnage {file_dt} s, {dt} s attendu")
-                if t0 is not None and abs(header.first_time - t0) > dt:
-                    raise ScopeError(f"{label} commence à {header.first_time} s, {t0} s "
-                                     f"attendu (même acquisition que l'enregistrement)")
                 own = [_unique(n, used) for n in names[column:column + header.n_signals]]
                 column += header.n_signals
-                n, _ = _import_file(path, header, own, signals, length, dtype, chunk_rows,
+                _import_tek_signals(path, header, own, signals, dtype, chunk_rows,
                                     lambda f: report((done + f * size) / total * 0.8,
                                                      f"Lecture de {label}"), stop)
-                if n != length:
-                    raise ScopeError(f"{label} : {n} points, {length} attendus (même "
-                                     f"acquisition que l'enregistrement)")
                 added += own
                 done += size
 
+            # exports PicoScope : forme d'onde choisie
+            picos = [p for p in others if is_picoscope_h5(p)]
+            for path in picos:
+                label = os.path.basename(path)
+                added += _import_pico_signals(
+                    path, signals, (waveforms or {}).get(path, 0), used, dtype,
+                    lambda f: report(0.8 * f, f"Lecture de {label}"), stop)
+
             # autres workspaces HDF5 : voies copiées avec leur pyramide
-            for path in others:
+            for path in [p for p in others if p not in picos]:
                 label = os.path.basename(path)
                 try:
                     source = h5py.File(path, "r")
@@ -335,25 +335,23 @@ def append_to_workspace(h5_path: str, sources: list[str],
                 with source:
                     if "signals" not in source:
                         raise ScopeError(f"{label} : pas un workspace d'oscilloscope")
-                    src_dt = float(source.attrs.get("sample_interval", 0.0) or 0.0)
-                    if abs(src_dt - dt) > 1e-9 * dt:
-                        raise ScopeError(f"{label} : échantillonnage {src_dt} s, {dt} s attendu")
-                    if t0 is not None and "time_origin" in source.attrs and \
-                            abs(float(source.attrs["time_origin"]) - t0) > dt:
-                        raise ScopeError(f"{label} : ne commence pas au même instant")
+                    src_dt, src_t0 = _file_timebase(source)
                     for name in source["signals"]:
                         group = source[f"signals/{name}"]
                         if "raw/value" not in group:
                             continue
-                        if group["raw/value"].shape[0] != length:
-                            raise ScopeError(f"{label}, {name} : {group['raw/value'].shape[0]} "
-                                             f"points, {length} attendus")
                         if stop():
                             raise ImportCancelled()
+                        dt = float(group.attrs.get("sample_interval", src_dt) or 0.0)
+                        if dt <= 0:
+                            raise ScopeError(f"{label}, {name} : intervalle "
+                                             f"d'échantillonnage absent")
                         new = _unique(name, used)
                         source.copy(group, signals, name=new)
                         signals[new].attrs["name"] = new
                         signals[new].attrs["source_file"] = label
+                        _set_timebase(signals[new], dt,
+                                      float(group.attrs.get("time_origin", src_t0)))
                         added.append(new)
 
             # rang d'affichage après les voies existantes ; pyramides des voies des CSV
@@ -367,6 +365,7 @@ def append_to_workspace(h5_path: str, sources: list[str],
                     raise ImportCancelled()
                 _overview(signals[name])
                 _pyramid(signals[name], stop)
+            _mark_timebases(h5)
             files = json.loads(h5.attrs.get("source_files", "[]"))
             h5.attrs["source_files"] = json.dumps(files + [os.path.basename(p) for p in sources])
             h5.attrs["signal_count"] = len(present) + len(added)
@@ -394,6 +393,52 @@ def _write_attrs(h5, headers: list[TekHeader], paths: list[str]):
         value = ref.value(key)
         if isinstance(value, (int, float)):
             h5.attrs[attr] = cast(value)
+
+
+def _set_timebase(group, dt: float, t0: float):
+    group.attrs["sample_interval"] = float(dt)
+    group.attrs["time_origin"] = float(t0)
+
+
+def _file_timebase(h5) -> tuple[float, float]:
+    """(intervalle, début) des attributs du fichier (base commune des voies)."""
+    attrs = h5.attrs
+    return (float(attrs.get("sample_interval", 0.0) or 0.0),
+            float(attrs.get("time_origin", attrs.get("horizontal_offset", 0.0))))
+
+
+def _fill_timebases(h5):
+    """Voies sans base de temps propre : celle du fichier, écrite sur la voie."""
+    dt, t0 = _file_timebase(h5)
+    for name, group in h5["signals"].items():
+        if "sample_interval" not in group.attrs:
+            if dt <= 0:
+                raise ScopeError(f"{name} : intervalle d'échantillonnage absent")
+            _set_timebase(group, dt, t0)
+
+
+def _mark_timebases(h5):
+    """Attribut mixed_timebase : vrai si les voies n'ont pas toutes la même base de temps."""
+    bases = {(float(g.attrs["sample_interval"]), float(g.attrs["time_origin"]),
+              int(g["raw/value"].shape[0]))
+             for g in h5["signals"].values()
+             if "sample_interval" in g.attrs and "raw/value" in g}
+    h5.attrs["mixed_timebase"] = len(bases) > 1
+
+
+def _import_tek_signals(path, header: TekHeader, names, signals, dtype, chunk_rows,
+                        progress, stop) -> tuple[int, float]:
+    """Voies d'un CSV Tektronix, avec leur base de temps : (points, intervalle)."""
+    n, measured = _import_file(path, header, names, signals, None, dtype, chunk_rows,
+                               progress, stop)
+    dt = header.value("sample_interval")
+    dt = float(dt) if isinstance(dt, (int, float)) and dt > 0 else measured
+    if not dt or dt <= 0:
+        raise ScopeError(f"{os.path.basename(path)} : intervalle d'échantillonnage "
+                         f"introuvable")
+    for name in names:
+        _set_timebase(signals[name], dt, header.first_time)
+    return n, dt
 
 
 def _import_file(path, header: TekHeader, names, signals, expected, dtype, chunk_rows,
@@ -517,7 +562,243 @@ def _pyramid(group, stop):
     pyramid.attrs["levels"] = level
 
 
+# ------------------------------------------------------------------ PicoScope
+
+UNIT_KEYS = ("unit", "units", "yunit", "y_unit", "ordinateunit", "verticalunit",
+             "ordinate unit", "vertical unit")
+
+
+def _text(value) -> str:
+    if isinstance(value, np.ndarray):
+        value = value.ravel()[0] if value.size else ""
+    if isinstance(value, (bytes, np.bytes_)):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _scalar(value) -> float:
+    return float(np.ravel(np.asarray(value, dtype=float))[0])
+
+
+@dataclass
+class PicoWaveform:
+    channel: str                  # nom de la voie (groupe)
+    path: str                     # dataset de la forme d'onde
+    t0: float                     # instant du premier échantillon (s)
+    dt: float                     # intervalle (s)
+    n: int                        # nombre d'échantillons
+    unit: str = ""
+
+
+@dataclass
+class PicoLayout:
+    waveforms: dict               # voie -> [PicoWaveform], dans l'ordre du fichier
+    metadata: dict = field(default_factory=dict)
+
+    @property
+    def count(self) -> int:
+        """Formes d'onde par voie (la plus fournie)."""
+        return max((len(v) for v in self.waveforms.values()), default=0)
+
+    def select(self, k: int) -> list[PicoWaveform]:
+        return [v[k] for v in self.waveforms.values() if k < len(v)]
+
+
+def is_picoscope_h5(path: str) -> bool:
+    """Export HDF5 PicoScope (/Abscissa, ou datasets à attributs start / interval)."""
+    if h5py is None or os.path.splitext(path)[1].lower() not in (".h5", ".hdf5"):
+        return False
+    try:
+        with h5py.File(path, "r") as h5:
+            if "signals" in h5:
+                return False                  # workspace
+            if isinstance(h5.get("Abscissa"), h5py.Dataset):
+                return True
+            return h5.visititems(lambda name, obj: True if isinstance(obj, h5py.Dataset)
+                                 and "start" in obj.attrs and "interval" in obj.attrs
+                                 else None) is not None
+    except OSError:
+        return False
+
+
+def _unit_of(obj) -> str:
+    for holder in (obj, obj.parent):
+        for key, value in holder.attrs.items():
+            if key.lower() in UNIT_KEYS:
+                return _text(value).strip()
+    return ""
+
+
+def _channel_of(dataset) -> str:
+    parent = dataset.parent.name.strip("/")
+    return parent.split("/")[-1] if parent else dataset.name.strip("/").split("/")[-1]
+
+
+def read_pico_layout(path: str) -> PicoLayout:
+    """Voies et formes d'onde d'un export HDF5 PicoScope (sans lire les échantillons)."""
+    _require_h5py()
+    label = os.path.basename(path)
+    try:
+        h5 = h5py.File(path, "r")
+    except OSError as exc:
+        raise ScopeError(f"{label} : HDF5 illisible ({exc})") from None
+    with h5:
+        meta = {"source": "PicoScope", "fichier": label}
+        meta.update({k: _text(v) for k, v in h5.attrs.items()})
+        waveforms: dict[str, list[PicoWaveform]] = {}
+
+        def add(dataset, t0, dt):
+            if dataset.ndim != 1 or dataset.shape[0] == 0:
+                return
+            if not dt > 0:
+                raise ScopeError(f"{label}, {dataset.name} : intervalle {dt} s invalide")
+            channel = _channel_of(dataset)
+            waveforms.setdefault(channel, []).append(PicoWaveform(
+                channel, dataset.name, float(t0), float(dt), int(dataset.shape[0]),
+                _unit_of(dataset)))
+
+        abscissa = h5.get("Abscissa")
+        if isinstance(abscissa, h5py.Dataset):
+            fields = abscissa.dtype.names or ()
+
+            def column(*words):
+                return next((f for f in fields if any(w in f.lower() for w in words)), None)
+            f_path, f_start, f_step = column("path"), column("start"), column("interval")
+            if None in (f_path, f_start, f_step):
+                raise ScopeError(f"{label} : /Abscissa contient {', '.join(fields) or '?'} ; "
+                                 f"Path, StartValue et Interval attendus")
+            unit = _text(abscissa.attrs.get("AbscissaUnit", "s")).strip()
+            meta["abscissa_unit"] = unit
+            if "hz" in unit.lower() or "hertz" in unit.lower():
+                raise ScopeError(f"{label} : abscisse en {unit} (spectre) ; seuls les "
+                                 f"enregistrements temporels sont pris en charge")
+            for row in np.atleast_1d(abscissa[()]):
+                target = _text(row[f_path])
+                dataset = h5.get(target)
+                if not isinstance(dataset, h5py.Dataset):
+                    raise ScopeError(f"{label} : forme d'onde {target} introuvable")
+                add(dataset, _scalar(row[f_start]), _scalar(row[f_step]))
+        else:                                 # attributs start (s depuis 1970) / interval
+            found = []
+            h5.visititems(lambda name, obj: found.append(obj) if isinstance(
+                obj, h5py.Dataset) and "start" in obj.attrs and "interval" in obj.attrs
+                else None)
+            if found:
+                # origine au premier début : les instants absolus (~1.7e9 s) perdraient la
+                # résolution d'un échantillon
+                epoch = min(_scalar(d.attrs["start"]) for d in found)
+                meta["start_epoch_s"] = epoch
+                for d in found:
+                    add(d, _scalar(d.attrs["start"]) - epoch, _scalar(d.attrs["interval"]))
+        if not waveforms:
+            keys = ", ".join(list(h5.keys())[:10]) or "vide"
+            raise ScopeError(f"{label} : format HDF5 non reconnu (ni workspace /signals, ni "
+                             f"export PicoScope /Abscissa) ; contenu : {keys}")
+        return PicoLayout(waveforms, meta)
+
+
+def default_pico_h5_path(path: str, waveform: int = 0, count: int = 1) -> str:
+    """Workspace produit à côté de l'export PicoScope (une forme d'onde)."""
+    base = os.path.splitext(os.path.abspath(path))[0]
+    return base + (f"_onde{waveform + 1}" if count > 1 else "") + ".workspace.h5"
+
+
+def _import_pico_signals(path, signals, waveform: int, used: set, dtype, progress,
+                         stop) -> list[str]:
+    """Voies de la forme d'onde `waveform` d'un export PicoScope : noms créés."""
+    layout = read_pico_layout(path)
+    if not 0 <= waveform < layout.count:
+        raise ScopeError(f"{os.path.basename(path)} : forme d'onde {waveform + 1}, "
+                         f"{layout.count} disponible(s)")
+    chosen = layout.select(waveform)
+    total = float(sum(w.n for w in chosen)) or 1.0
+    done, names = 0, []
+    with h5py.File(path, "r") as source:
+        for wf in chosen:
+            name = _unique(wf.channel, used)
+            group = signals.create_group(name)
+            group.attrs.update({"index": len(signals) - 1, "name": name,
+                                "source_file": os.path.basename(path),
+                                "source_path": wf.path, "waveform": waveform + 1})
+            if wf.unit:
+                group.attrs["unit"] = wf.unit
+            _set_timebase(group, wf.dt, wf.t0)
+            group.create_group("overview")
+            group.create_group("pyramid")
+            data = source[wf.path]
+            dset = group.create_group("raw").create_dataset(
+                "value", shape=(wf.n,), dtype=dtype, chunks=(min(RAW_CHUNK, wf.n),))
+            for start in range(0, wf.n, RAW_CHUNK):
+                if stop():
+                    raise ImportCancelled()
+                end = min(start + RAW_CHUNK, wf.n)
+                dset[start:end] = data[start:end]
+                done += end - start
+                progress(done / total)
+            names.append(name)
+    return names
+
+
+def import_picoscope(path: str, h5_path: str, waveform: int = 0,
+                     progress: Callable[[float, str], None] | None = None,
+                     cancelled: Callable[[], bool] | None = None,
+                     dtype=np.float32) -> str:
+    """
+    Convertit une forme d'onde d'un export HDF5 PicoScope (toutes ses voies) en
+    workspace, avec vue d'ensemble et pyramide. Chaque voie garde sa base de temps.
+    """
+    _require_h5py()
+    path = os.path.abspath(path)
+    layout = read_pico_layout(path)
+    report = progress or (lambda f, t: None)
+    stop = cancelled or (lambda: False)
+    tmp_path = h5_path + ".partiel"
+    label = os.path.basename(path)
+    try:
+        with h5py.File(tmp_path, "w") as h5:
+            meta = dict(layout.metadata, waveform=waveform + 1, waveforms=layout.count)
+            h5.attrs["format"] = FORMAT
+            h5.attrs["format_version"] = "0.1"
+            h5.attrs["created_by"] = "loggerFPGA"
+            h5.attrs["metadata_json"] = json.dumps(meta, indent=2)
+            h5.attrs["source_files"] = json.dumps([label])
+            signals = h5.create_group("signals")
+            names = _import_pico_signals(path, signals, waveform, set(), dtype,
+                                         lambda f: report(0.8 * f, f"Lecture de {label}"),
+                                         stop)
+            first = signals[names[0]]
+            h5.attrs["sample_interval"] = float(first.attrs["sample_interval"])
+            h5.attrs["time_origin"] = min(float(signals[n].attrs["time_origin"])
+                                          for n in names)
+            h5.attrs["record_length_imported"] = int(first["raw/value"].shape[0])
+            h5.attrs["signal_count"] = len(names)
+            _mark_timebases(h5)
+            for k, name in enumerate(names):
+                report(0.8 + 0.2 * k / len(names), f"Pyramide de {name}")
+                _overview(signals[name])
+                _pyramid(signals[name], stop)
+            report(1.0, "Terminé")
+        os.replace(tmp_path, h5_path)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+    return h5_path
+
+
 # ------------------------------------------------------------------ lecture
+
+@dataclass
+class Timebase:
+    """Base de temps d'une voie : t(i) = t0 + i * dt, i < n."""
+    t0: float
+    dt: float
+    n: int
+
+    @property
+    def last(self) -> float:
+        return self.t0 + (self.n - 1) * self.dt
+
 
 @dataclass
 class Window:
@@ -543,6 +824,8 @@ class ScopeRecord:
             raise ScopeError(f"Fichier HDF5 illisible : {exc}") from None
         if "signals" not in self.h5:
             self.close()
+            if is_picoscope_h5(self.path):
+                raise ScopeError("Export PicoScope : à convertir (import_picoscope)")
             raise ScopeError("Groupe /signals absent : pas un workspace d'oscilloscope")
         # ordre des voies : attribut index (HDF5 range les groupes par ordre alphabétique)
         present = [name for name in self.h5["signals"]
@@ -552,14 +835,32 @@ class ScopeRecord:
         if not self.names:
             self.close()
             raise ScopeError("Aucune voie dans le fichier")
-        lengths = {self.raw(name).shape[0] for name in self.names}
-        self.length = min(lengths)
         attrs = self.h5.attrs
-        self.dt = float(attrs.get("sample_interval", 0.0) or 0.0)
-        if self.dt <= 0:
-            self.close()
-            raise ScopeError("Intervalle d'échantillonnage (sample_interval) absent")
-        self.t0 = float(attrs.get("time_origin", attrs.get("horizontal_offset", 0.0)))
+        file_dt, file_t0 = _file_timebase(self.h5)
+        self.timebases: dict[str, Timebase] = {}
+        self.units: dict[str, str] = {}
+        for name in self.names:
+            a = self.h5[f"signals/{name}"].attrs
+            dt = float(a.get("sample_interval", file_dt) or 0.0)
+            if dt <= 0:
+                self.close()
+                raise ScopeError(f"{name} : intervalle d'échantillonnage (sample_interval) "
+                                 f"absent")
+            self.timebases[name] = Timebase(float(a.get("time_origin", file_t0)), dt,
+                                            int(self.raw(name).shape[0]))
+            self.units[name] = _text(a["unit"]) if "unit" in a else ""
+        bases = list(self.timebases.values())
+        ref = bases[0]
+        # même échantillonnage, mêmes instants, même longueur : lecture directe par indices
+        self.uniform = all(abs(b.dt - ref.dt) <= 1e-9 * ref.dt and b.n == ref.n
+                           and abs(b.t0 - ref.t0) <= 1e-3 * ref.dt for b in bases)
+        if self.uniform:
+            self.dt, self.t0, self.length = ref.dt, ref.t0, ref.n
+        else:                                 # grille virtuelle : voie la plus fine
+            self.dt = min(b.dt for b in bases)
+            self.t0 = min(b.t0 for b in bases)
+            end = max(b.t0 + b.n * b.dt for b in bases)
+            self.length = max(1, int(round((end - self.t0) / self.dt)))
         try:
             self.metadata = json.loads(attrs.get("metadata_json", "{}"))
         except ValueError:
@@ -607,6 +908,8 @@ class ScopeRecord:
                     target_bins: int = TARGET_BINS) -> Window:
         start = max(0, min(int(start), self.length - 1))
         stop = max(start + 1, min(int(stop), self.length))
+        if not self.uniform:
+            return self._read_mixed(start, stop, max_raw, target_bins)
         n = stop - start
         if n <= max_raw:
             data = {name: np.asarray(self.raw(name)[start:stop], dtype=float)
@@ -638,3 +941,128 @@ class ScopeRecord:
         data = {k: v[:common] for k, v in data.items()}
         return Window(self.time_of(first * spb_used), spb_used * self.dt / 2, data, True,
                       spb_used, first * spb_used, min(self.length, (first + common // 2) * spb_used))
+
+    # ------------------------------------------------------------------ bases différentes
+    def grid(self, ta: float, tb: float) -> tuple[float, float, int]:
+        """
+        Grille commune de [ta, tb] : (premier instant, intervalle, points), alignée sur les
+        échantillons de la voie la plus fine présente dans la portion.
+        """
+        bases = list(self.timebases.values())
+        present = [b for b in bases if b.t0 <= tb and b.last >= ta] or bases
+        ref = min(present, key=lambda b: b.dt)
+        k0 = math.ceil((ta - ref.t0) / ref.dt - 1e-6)
+        k1 = math.floor((tb - ref.t0) / ref.dt + 1e-6)
+        return ref.t0 + k0 * ref.dt, ref.dt, max(k1 - k0 + 1, 1)
+
+    def interp(self, name: str, times: np.ndarray) -> np.ndarray:
+        """Valeurs de la voie aux instants `times` (croissants) : linéaire, NaN hors voie."""
+        b = self.timebases[name]
+        out = np.full(times.size, np.nan)
+        if times.size == 0:
+            return out
+        a = max(int(math.floor((times[0] - b.t0) / b.dt)), 0)
+        z = min(int(math.ceil((times[-1] - b.t0) / b.dt)) + 1, b.n)
+        if z - a < 1:
+            return out
+        y = np.asarray(self.raw(name)[a:z], dtype=float)
+        xs = b.t0 + np.arange(a, z) * b.dt
+        if y.size == 1:                       # un seul échantillon : à une demi-période
+            out[np.abs(times - xs[0]) <= b.dt / 2] = y[0]
+            return out
+        return np.interp(times, xs, y, left=np.nan, right=np.nan)
+
+    def resample(self, name: str, x0: float, dt: float, n: int) -> np.ndarray:
+        """Voie sur la grille x0 + k dt : échantillons bruts si ce sont ses instants."""
+        b = self.timebases[name]
+        pos = (x0 - b.t0) / b.dt
+        if abs(dt - b.dt) <= 1e-9 * b.dt and abs(pos - round(pos)) < 1e-6:
+            i0 = int(round(pos))
+            out = np.full(n, np.nan)
+            a, z = max(i0, 0), min(i0 + n, b.n)
+            if z > a:
+                out[a - i0:z - i0] = self.raw(name)[a:z]
+            return out
+        return self.interp(name, x0 + np.arange(n) * dt)
+
+    def _envelope(self, name: str, ta: float, width: float, bins: int) -> np.ndarray:
+        """Enveloppe (min, max alternés) de la voie sur `bins` colonnes de `width` s."""
+        b = self.timebases[name]
+        if b.dt >= width / 2:                 # échantillons plus espacés que les colonnes
+            values = self.interp(name, ta + (np.arange(bins) + 0.5) * width)
+            return np.repeat(values, 2)
+        levels = [lv for lv in self.levels[name] if lv[0] * b.dt <= width]
+        if levels:
+            spb, key = levels[-1]
+            group = self.h5[f"signals/{name}/pyramid/{key}"]
+            src_min, src_max = group["min"], group["max"]
+        else:
+            spb, src_min = 1, self.raw(name)
+            src_max = src_min
+        bw = spb * b.dt
+        b0 = max(int(math.floor((ta - b.t0) / bw)), 0)
+        b1 = min(int(math.ceil((ta + bins * width - b.t0) / bw)), src_min.shape[0])
+        mins = np.full(bins, np.inf)
+        maxs = np.full(bins, -np.inf)
+        if b1 > b0:
+            centers = b.t0 + (np.arange(b0, b1) + 0.5) * bw
+            column = np.floor((centers - ta) / width).astype(np.int64)
+            ok = (column >= 0) & (column < bins)
+            np.minimum.at(mins, column[ok], np.asarray(src_min[b0:b1], dtype=float)[ok])
+            np.maximum.at(maxs, column[ok], np.asarray(src_max[b0:b1], dtype=float)[ok])
+        mins[np.isinf(mins)] = np.nan
+        maxs[np.isinf(maxs)] = np.nan
+        env = np.empty(2 * bins)
+        env[0::2], env[1::2] = mins, maxs
+        return env
+
+    def _read_mixed(self, start: int, stop: int, max_raw: int, target_bins: int) -> Window:
+        ta, tb = self.time_of(start), self.time_of(stop)
+        x0, dt, n = self.grid(ta, tb)
+        if n <= max_raw:
+            data = {name: self.resample(name, x0, dt, n) for name in self.names}
+            first = self.index_of(x0)
+            return Window(x0, dt, data, False, 1, first,
+                          max(first + 1, self.index_of(x0 + n * dt)))
+        width = (tb - ta) / target_bins
+        data = {name: self._envelope(name, ta, width, target_bins) for name in self.names}
+        return Window(ta, width / 2, data, True, max(1, int(round(width / self.dt))),
+                      start, stop)
+
+    # ------------------------------------------------------------------ zone (FFT, motif)
+    def read_zone(self, t0: float, t1: float, limit: int) -> tuple[float, float, np.ndarray]:
+        """
+        Données brutes de [t0, t1], toutes les voies : (premier instant, intervalle,
+        tableau (n, voies)). Bases différentes : grille commune (voir grid). ValueError
+        au-delà de `limit` points.
+        """
+        lo, hi = min(t0, t1), max(t0, t1)
+        if self.uniform:
+            start = self.index_of(lo)
+            stop = min(self.index_of(hi) + 1, self.length)
+            n = max(stop - start, 0)
+            x0, dt = self.time_of(start), self.dt
+        else:
+            x0, dt, n = self.grid(lo, hi)
+        if n > limit:
+            from model import measures
+            raise ValueError(f"zone de {measures.si(n, '', 3)} points : "
+                             f"{measures.si(limit, '', 2)} au plus, la réduire")
+        if n <= 0:
+            return x0, dt, np.empty((0, len(self.names)))
+        if self.uniform:
+            cols = [np.asarray(self.raw(name)[start:start + n], dtype=float)
+                    for name in self.names]
+        else:
+            cols = [self.resample(name, x0, dt, n) for name in self.names]
+        return x0, dt, np.column_stack(cols)
+
+    def read_native(self, name: str, t0: float, t1: float) -> tuple[np.ndarray, np.ndarray]:
+        """Échantillons de la voie dans [t0, t1], à ses propres instants : (t, y)."""
+        b = self.timebases[name]
+        lo, hi = min(t0, t1), max(t0, t1)
+        a = max(int(math.ceil((lo - b.t0) / b.dt - 1e-6)), 0)
+        z = min(int(math.floor((hi - b.t0) / b.dt + 1e-6)) + 1, b.n)
+        if z <= a:
+            return np.empty(0), np.empty(0)
+        return b.t0 + np.arange(a, z) * b.dt, np.asarray(self.raw(name)[a:z], dtype=float)

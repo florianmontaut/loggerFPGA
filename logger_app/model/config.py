@@ -87,6 +87,7 @@ class LoggerConfig:
     record_points:  int = 0
     time_origin:    float = 0.0
     source_name:    str = ""
+    channel_tips:   list[str] = field(default_factory=list)   # base de temps par voie
     # --- description des voies ---
     analog_names:   list[str] = field(default_factory=lambda: list(DEFAULT_ANALOG_NAMES))
     logic_names:    list[str] = field(default_factory=lambda: list(DEFAULT_LOGIC_NAMES))

@@ -8,6 +8,10 @@ HDF5_viewer) et parcourus par zoom.
       barre de progression (annulable) ; le .h5 produit à côté des CSV est réutilisé tant
       qu'il est plus récent qu'eux ;
     - ouverture directe d'un .h5 (du logger ou de csv_to_hdf5.py) ;
+    - export HDF5 de PicoScope 7 : conversion en workspace (forme d'onde choisie s'il y
+      en a plusieurs), réutilisée tant qu'elle est plus récente que l'export ;
+    - voies de bases de temps différentes : rééchantillonnées à la lecture sur la grille
+      de la plus fine (model/scope_record.py), trous (NaN) hors de l'étendue d'une voie ;
     - vue d'ensemble de tout l'enregistrement au-dessus des graphiques, avec la zone
       affichée (à déplacer ou élargir à la souris) ;
     - à chaque zoom / déplacement, la portion visible est relue : données brutes jusqu'à
@@ -28,8 +32,9 @@ from model import measures
 from model.config import LoggerConfig
 from model.protocol import Frame
 from model.scope_record import (MAX_RAW_POINTS, ImportCancelled, ScopeError, ScopeRecord,
-                                append_to_workspace, default_h5_path, import_tek_csv,
-                                is_tek_csv)
+                                append_to_workspace, default_h5_path, default_pico_h5_path,
+                                import_picoscope, import_tek_csv, is_picoscope_h5,
+                                is_tek_csv, read_pico_layout)
 from ressources import pens
 
 RELOAD_DELAY_MS = 60               # regroupe les changements de zoom rapprochés
@@ -130,6 +135,8 @@ class ScopeController(QtCore.QObject):
         self._sources = None                # fichiers choisis, signalés par loaded
         self._failed_reopen = None          # ajout de voies : enregistrement à rouvrir
         self.max_raw = MAX_RAW_POINTS     # au-delà : enveloppe min/max
+        # export PicoScope à plusieurs formes d'onde : (fichier, nombre) -> indice ou None
+        self.choose_waveform = self._ask_waveform
 
         self.overview_plot = pg.PlotItem()
         self.overview_plot.showGrid(x=True, y=False, alpha=0.2)
@@ -165,6 +172,8 @@ class ScopeController(QtCore.QObject):
                 self._error("Ouvrir un seul fichier .h5 à la fois")
                 return False
             self._sources = paths
+            if is_picoscope_h5(h5[0]):
+                return self._open_picoscope(h5[0])
             return self._open_h5(h5[0])
         not_tek = [os.path.basename(p) for p in paths if not is_tek_csv(p)]
         if not_tek:
@@ -178,6 +187,41 @@ class ScopeController(QtCore.QObject):
             return self._open_h5(h5_path)
         self._sources = paths
         self._start_import(paths, h5_path)
+        return True
+
+    def _waveform_of(self, path: str) -> int | None:
+        """Forme d'onde à charger d'un export PicoScope ; None : abandon (ou erreur)."""
+        try:
+            count = read_pico_layout(path).count
+        except ScopeError as exc:
+            self._error(str(exc))
+            return None
+        return 0 if count <= 1 else self.choose_waveform(path, count)
+
+    def _ask_waveform(self, path: str, count: int) -> int | None:
+        value, ok = QtWidgets.QInputDialog.getInt(
+            self.view, "Export PicoScope",
+            f"{os.path.basename(path)} : {count} formes d'onde par voie.\n"
+            f"Forme d'onde à charger :", 1, 1, count)
+        return value - 1 if ok else None
+
+    def _open_picoscope(self, path: str) -> bool:
+        try:
+            count = read_pico_layout(path).count
+        except ScopeError as exc:
+            self._error(str(exc))
+            return False
+        waveform = self._waveform_of(path)
+        if waveform is None:
+            self._sources = None
+            return False
+        h5_path = default_pico_h5_path(path, waveform, count)
+        if os.path.exists(h5_path) and os.path.getmtime(h5_path) >= os.path.getmtime(path):
+            self.message.emit(f"Conversion existante réutilisée : {os.path.basename(h5_path)}")
+            return self._open_h5(h5_path)
+        self._run(lambda progress, cancelled: import_picoscope(
+            path, h5_path, waveform, progress=progress, cancelled=cancelled),
+            "Conversion de l'export PicoScope...")
         return True
 
     def _start_import(self, paths, h5_path):
@@ -194,6 +238,13 @@ class ScopeController(QtCore.QObject):
         if self.record is None or self.worker is not None:
             return False
         paths = [os.path.abspath(p) for p in paths]
+        waveforms = {}
+        for path in paths:
+            if is_picoscope_h5(path):
+                waveform = self._waveform_of(path)
+                if waveform is None:
+                    return False
+                waveforms[path] = waveform
         target = self.record.path
         view = tuple(self.graph.analog_plot.vb.viewRange()[0])
         before = list(self.record.names)
@@ -202,7 +253,8 @@ class ScopeController(QtCore.QObject):
         self._failed_reopen = target
         self._sources = paths
         self._run(lambda progress, cancelled: (
-            append_to_workspace(target, paths, progress=progress, cancelled=cancelled),
+            append_to_workspace(target, paths, progress=progress, cancelled=cancelled,
+                                waveforms=waveforms),
             target)[1], "Ajout des voies...")
         return True
 
@@ -283,6 +335,9 @@ class ScopeController(QtCore.QObject):
         self.view.actionCloseScope.setEnabled(True)
         self.view.actionAddScopeChannels.setEnabled(True)
         self.opened.emit(self.cfg)            # le contrôleur principal configure l'affichage
+        if not record.uniform:
+            self.message.emit("Voies de bases de temps différentes : affichage sur la grille "
+                              "de la plus fine présente, trous hors de l'étendue d'une voie")
         if view_range is not None:            # même portion qu'avant (ajout de voies)
             self.graph.analog_plot.setXRange(*view_range, padding=0)
             self._syncing = True
@@ -301,8 +356,14 @@ class ScopeController(QtCore.QObject):
             raise ScopeError("15 voies au plus")
         cfg = LoggerConfig(signals=list(range(n)), gains=[1.0] * 15)
         cfg.analog_names = record.names + cfg.analog_names[n:]
-        unit = (record.metadata.get("vertical_units") or {}).get("value", "")
-        cfg.units = [str(unit)] * 15
+        unit = record.metadata.get("vertical_units") or {}
+        unit = str(unit.get("value", "") if isinstance(unit, dict) else unit)
+        cfg.units = [record.units.get(name) or unit for name in record.names] + \
+            [unit] * (15 - n)
+        cfg.channel_tips = [f"{measures.si(1 / tb.dt, 'Hz', 4)}, "
+                            f"{tb.n:,} points".replace(",", " ")
+                            + f", début {measures.si(tb.t0, 's', 6)}"
+                            for tb in (record.timebases[name] for name in record.names)]
         cfg.sample_rate_hz = record.sample_rate
         cfg.record_points = record.length
         cfg.time_origin = record.t0
@@ -363,7 +424,7 @@ class ScopeController(QtCore.QObject):
         names = self.record.names
         analog = np.column_stack([window.data[name] for name in names])
         n = analog.shape[0]
-        points = window.last_index - window.first_index
+        points = window.last_index - window.first_index if window.envelope else n
         if window.envelope:
             what = (f"enveloppe min/max, {measures.si(points, '', 3)} points "
                     f"(zoomer sous {measures.si(self.max_raw, '', 2)} points pour "
@@ -374,6 +435,7 @@ class ScopeController(QtCore.QObject):
                       raw=np.empty((n, 0), dtype=np.int16), analog=analog, logic=None,
                       sample_rate=1.0 / window.step, t0=window.x0)
         frame.meta.update({"scope": self.record.path, "envelope": window.envelope,
+                           "gaps": not self.record.uniform,
                            "saved": self.record.path,
                            "title": f"{os.path.basename(self.record.path)} — {what}"})
         return frame
@@ -386,27 +448,26 @@ class ScopeController(QtCore.QObject):
         """
         if self.record is None:
             raise ValueError("aucun enregistrement")
-        start, stop = self.record.index_of(t0), self.record.index_of(t1) + 1
-        stop = min(stop, self.record.length)
-        n = stop - start
-        if n > MAX_FFT_ZONE_POINTS:
-            raise ValueError(f"zone de {measures.si(n, '', 3)} points : "
-                             f"{measures.si(MAX_FFT_ZONE_POINTS, '', 2)} au plus, la réduire")
-        data = np.column_stack([np.asarray(self.record.raw(name)[start:stop], dtype=float)
-                                for name in self.record.names]) if n > 0 else np.empty((0, 1))
-        return data, self.record.sample_rate, list(range(len(self.record.names)))
+        _x0, dt, data = self.record.read_zone(t0, t1, MAX_FFT_ZONE_POINTS)
+        return data, 1.0 / dt, list(range(len(self.record.names)))
 
     def read_zone_frame(self, t0: float, t1: float) -> Frame:
         """
         Trame des données brutes de [t0, t1] (toutes les voies), lue dans le fichier quel
         que soit le zoom : export d'un motif. ValueError au-delà de MAX_FFT_ZONE_POINTS.
         """
-        data, fs, signals = self.read_zone(t0, t1)
-        start = self.record.index_of(t0)
-        frame = Frame(index=0, signals=signals, raw=np.empty((data.shape[0], 0), np.int16),
-                      analog=data, logic=None, sample_rate=fs,
-                      t0=self.record.time_of(start))
-        frame.meta["scope"] = self.record.path
+        if self.record is None:
+            raise ValueError("aucun enregistrement")
+        x0, dt, data = self.record.read_zone(t0, t1, MAX_FFT_ZONE_POINTS)
+        record = self.record
+        frame = Frame(index=0, signals=list(range(len(record.names))),
+                      raw=np.empty((data.shape[0], 0), np.int16),
+                      analog=data, logic=None, sample_rate=1.0 / dt, t0=x0)
+        frame.meta["scope"] = record.path
+        if not record.uniform:
+            # échantillons de chaque voie à ses propres instants (motif sans interpolation)
+            frame.meta["native"] = {j: record.read_native(name, t0, t1)
+                                    for j, name in enumerate(record.names)}
         return frame
 
     def show_all(self):

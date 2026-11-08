@@ -229,7 +229,12 @@ class PatternController(QtCore.QObject):
         if key[0] == "A":
             if key[1] not in frame.analog_signals:
                 return "voie absente de la trame"
-            y = frame.analog[:, frame.analog_signals.index(key[1])]
+            j = frame.analog_signals.index(key[1])
+            native = frame.meta.get("native") or {}
+            if j in native:                 # bases de temps différentes : ses instants
+                t, y = native[j]
+                return (t, y) if t.size else "voie sans échantillon dans la zone"
+            y = frame.analog[:, j]
         elif key[0] == "L":
             if frame.logic is None:
                 return "pas de voie logique dans la trame"
@@ -238,6 +243,11 @@ class PatternController(QtCore.QObject):
             if key[1] not in math:
                 return "voie calculée indisponible (formule invalide ou enveloppe)"
             y = math[key[1]]
+        finite = np.isfinite(y)
+        if not finite.all():                # hors de l'étendue d'une voie (NaN)
+            t, y = t[finite], y[finite]
+            if not t.size:
+                return "voie sans échantillon dans la zone"
         return t, y
 
     def update(self):

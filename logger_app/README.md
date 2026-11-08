@@ -83,7 +83,7 @@ logger_app/
 │   ├── math_channels.py           voies calculées : fonctions temps réel, unités, évaluation
 │   ├── loader.py                  relecture d'un enregistrement (.csv, .npz)
 │   ├── pattern.py                 export d'un motif : sélection, décimation, formats
-│   ├── scope_record.py            oscilloscope : import CSV Tektronix -> HDF5, lecture par zoom
+│   ├── scope_record.py            oscilloscope : import CSV Tektronix / HDF5 PicoScope -> HDF5, lecture par zoom
 │   ├── spectrum.py                FFT : fenêtres, amplitudes calibrées, moyennage, pics, THD
 │   └── measures.py                mesures entre deux curseurs (Δt, Δy, min, max, moyenne, efficace)
 ├── controller/
@@ -347,7 +347,7 @@ Lecture : environ 0,5 s pour 64 trames (21 Mo de CSV).
 
 ![relecture d'un enregistrement](docs/capture_relecture.png)
 
-### Enregistrements longs d'oscilloscope (Tektronix)
+### Enregistrements longs d'oscilloscope (Tektronix, PicoScope)
 
 Le même outil sert à parcourir les enregistrements d'oscilloscope (DPO7054…), qui font
 plusieurs millions de points par voie. *Fichier › Ouvrir un enregistrement...* reconnaît
@@ -358,6 +358,7 @@ le type de fichier :
 | CSV du logger (`trame,temps_s,...`), npz | relecture dans la mémoire tampon (section précédente) |
 | CSV Tektronix (un ou plusieurs) | conversion en HDF5, puis mode enregistrement long |
 | `.h5` (logger ou `csv_to_hdf5.py` de HDF5_viewer) | mode enregistrement long |
+| `.h5` exporté par PicoScope 7 | conversion en workspace HDF5, puis mode enregistrement long |
 
 **Format CSV Tektronix.** Les données commencent dès la ligne 0 : colonnes 0 à 2 pour
 les métadonnées des premières lignes (`Record Length`, `Sample Interval`, `Trigger
@@ -376,9 +377,9 @@ de les réunir dans un même enregistrement :
   peut aussi être ajouté : ses voies sont copiées avec leur pyramide. La portion affichée
   est conservée.
 
-Les voies réunies doivent venir de la même acquisition : même intervalle
-d'échantillonnage, même nombre de points, même premier instant. Sinon l'ajout est refusé
-avec un message, et l'enregistrement reste inchangé. L'ajout s'écrit dans une copie du
+Les voies réunies peuvent venir d'acquisitions différentes (voir *Bases de temps
+différentes* ci-dessous). Un fichier illisible ou d'un format inconnu est refusé avec un
+message, et l'enregistrement reste inchangé. L'ajout s'écrit dans une copie du
 `.h5`, qui ne remplace l'original qu'en cas de succès : une annulation ou une erreur ne
 l'abîme pas.
 
@@ -395,6 +396,54 @@ récent que lui. Sa structure est celle de HDF5_viewer (`/signals/<voie>/raw/val
 l'autre (vérifié dans les deux sens). Lecture du CSV par blocs avec numpy, sans pandas :
 environ 4 s pour 5 millions de points sur 2 voies, soit une vingtaine de secondes pour
 25 M. Le HDF5 est environ 3 fois plus petit que le CSV.
+
+**Export HDF5 PicoScope 7.** *Ouvrir un enregistrement...* reconnaît un `.h5` exporté
+par PicoScope : un groupe par voie, un dataset par forme d'onde, et la table `/Abscissa`
+(`Path`, `StartValue`, `Interval`, attribut `AbscissaUnit`), d'où
+t = StartValue + i × Interval pour chaque forme d'onde.
+* **Plusieurs formes d'onde par voie** (captures successives) : une boîte demande
+  laquelle charger ; toutes ses voies sont chargées.
+* La forme d'onde est **convertie en workspace** (`<export>.workspace.h5`, ou
+  `<export>_ondeN.workspace.h5` s'il y en a plusieurs), avec vue d'ensemble et pyramide,
+  comme un CSV Tektronix. Comme pour le CSV, la conversion est réutilisée tant qu'elle
+  est plus récente que l'export.
+* L'unité d'une voie est reprise si l'export la donne en attribut (`Unit`...), sinon la
+  voie est sans unité.
+* Un export **en fréquence** (`AbscissaUnit` en Hz, spectre) est refusé.
+* Variante reconnue : des datasets portant les attributs `start` (secondes depuis 1970)
+  et `interval`. Le temps est alors compté depuis le premier `start`.
+* Un export PicoScope peut aussi être **ajouté** à un enregistrement affiché, et
+  inversement.
+
+**Bases de temps différentes.** Chaque voie garde ses échantillons et sa propre base de
+temps : intervalle, premier instant, nombre de points. C'est le cas de deux
+enregistrements Tektronix d'échantillonnages différents, ou d'un export PicoScope (le
+début varie d'une voie à l'autre avec la stabilisation du déclenchement, la longueur avec
+le filtrage). Le message « Voies de bases de temps différentes » le signale à
+l'ouverture, et l'infobulle de chaque voie dans l'arborescence donne sa fréquence, son
+nombre de points et son début.
+* **Affichage** : la portion visible est relue sur la grille de la voie la plus fine
+  présente dans cette portion. Les autres voies y sont interpolées linéairement, ce qui
+  donne le même tracé que leurs propres points reliés.
+* **Hors de l'étendue d'une voie** : sa courbe s'interrompt et sa valeur dans
+  l'arborescence affiche « — ».
+* **Enveloppe min/max** : chaque voie est lue dans sa propre pyramide, puis regroupée
+  sur des colonnes de temps communes.
+* **Curseurs, voies calculées** : ils travaillent sur la grille commune, donc sur des
+  valeurs interpolées pour les voies plus lentes. Une voie calculée est indéfinie là où
+  une voie qu'elle utilise l'est.
+* **FFT** : elle est calculée sur la grille commune. Au-delà de la fréquence de Nyquist
+  de sa propre fréquence d'échantillonnage, le spectre d'une voie plus lente n'est que
+  l'effet de l'interpolation. Une voie sans données sur toute la zone est signalée dans
+  le titre.
+* **Exporter un motif** : les points d'une voie analogique sont ses propres échantillons,
+  à ses propres instants, sans interpolation.
+* **Lecture par HDF5_viewer** : ce cas n'y est pas pris en charge. HDF5_viewer ne lit
+  que la base de temps du fichier, celle de la première voie, et l'attribut
+  `mixed_timebase` du fichier vaut alors vrai. Les enregistrements d'une seule base de
+  temps restent lisibles par les deux outils.
+
+![export PicoScope : voies de bases de temps différentes](docs/capture_picoscope.png)
 
 **Navigation.**
 * Une **vue d'ensemble** de tout l'enregistrement s'affiche au-dessus des graphiques.
@@ -621,7 +670,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-211 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, acquisition complète contre le
+216 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, exports PicoScope et bases de temps différentes, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes
