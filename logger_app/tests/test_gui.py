@@ -917,18 +917,82 @@ def test_scope_add_refused_keeps_record(setup, tmp_path, monkeypatch):
     shown = []
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a: shown.append(a[2]))
     ch1 = _tek_channel(tmp_path / "tek0000CH1.csv", np.zeros(20_000))
-    other = _tek_channel(tmp_path / "autre_CH2.csv", np.ones(15_000))   # autre acquisition
+    import h5py
+    other = str(tmp_path / "inconnu.h5")                   # HDF5 non reconnu
+    with h5py.File(other, "w") as h5:
+        h5.create_dataset("x", data=np.zeros(10))
     _open_scope(qapp, ctrl, [ch1])
     monkeypatch.setattr(ctrl, "_ask_add_or_replace", lambda paths: "add")
     assert ctrl.open_files([other])
     assert scope.wait_import()
     assert wait(qapp, lambda: shown and scope.active)
-    assert "points" in shown[-1]
+    assert "workspace" in shown[-1]
     assert scope.record.names == ["CH1"]                   # enregistrement rouvert, intact
     # « Annuler » : rien ne change
     monkeypatch.setattr(ctrl, "_ask_add_or_replace", lambda paths: "cancel")
     assert not ctrl.open_files([other])
     assert scope.record.names == ["CH1"]
+
+
+def test_scope_picoscope_and_timebases(setup, tmp_path, monkeypatch):
+    """Export PicoScope (forme d'onde choisie), voies de bases de temps différentes."""
+    from pico_files import pico_h5
+    qapp, sim, window, ctrl = setup
+    scope = ctrl.scope_ctrl
+    n = 100_000
+    t = np.arange(n) * 1e-7
+    a = np.sin(2 * np.pi * 10e3 * t)
+    b = np.arange(30_000) / 1e3                            # rampe, 2 x plus lente, décalée
+    path = pico_h5(tmp_path / "capture.h5", {
+        "A": [(np.zeros(n), 0.0, 1e-7), (a, 0.0, 1e-7)],
+        "B": [(np.zeros(n), 0.0, 1e-7), (b, 2e-3, 2e-7)]})
+    asked = []
+    monkeypatch.setattr(scope, "choose_waveform", lambda p, count: asked.append(count) or 1)
+    _open_scope(qapp, ctrl, [path])
+    assert asked == [2]
+    assert scope.record.names == ["A", "B"] and not scope.record.uniform
+    assert scope.record.path.endswith("capture_onde2.workspace.h5")
+    frame = ctrl.graph_ctrl.frame
+    assert frame.meta["gaps"]
+    assert ctrl.graph_ctrl.curves[("A", 1)].opts["connect"] == "finite"
+    tips = ctrl.tree_ctrl.items[("A", 1)][0].toolTip()
+    assert "5 MHz" in tips and "30 000 points" in tips
+    assert scope.cfg.units[0] == "V"
+    # zoom sur les deux voies : données brutes, grille de A, B interpolée
+    ctrl.graph_ctrl.analog_plot.setXRange(2.0e-3, 2.1e-3, padding=0)
+    assert wait(qapp, lambda: not ctrl.graph_ctrl.frame.meta["envelope"]
+                and ctrl.graph_ctrl.frame.n_samples < 2000)
+    frame = ctrl.graph_ctrl.frame
+    assert frame.sample_rate == pytest.approx(1e7)
+    assert np.isfinite(frame.analog).all()
+    # zone (FFT) : grille commune ; motif : échantillons propres de B
+    data, fs, _ = scope.read_zone(2.0e-3, 2.1e-3)
+    assert fs == pytest.approx(1e7) and data.shape[1] == 2
+    zone = scope.read_zone_frame(2.0e-3, 2.1e-3)
+    tb, yb = zone.meta["native"][1]
+    assert np.diff(tb) == pytest.approx(np.full(tb.size - 1, 2e-7))
+    np.testing.assert_allclose(yb[:3], b[:3], atol=1e-6)
+    # rouvrir : conversion réutilisée, forme d'onde redemandée
+    scope.close()
+    _open_scope(qapp, ctrl, [path])
+    assert asked == [2, 2]
+    assert "réutilisée" in window.statusBar().currentMessage() or scope.active
+    # forme d'onde refusée (Annuler) : rien n'est ouvert
+    scope.close()
+    monkeypatch.setattr(scope, "choose_waveform", lambda p, count: None)
+    assert not ctrl.open_files([path])
+    assert not scope.active
+    # ajout d'un CSV Tektronix d'un autre échantillonnage
+    monkeypatch.setattr(scope, "choose_waveform", lambda p, count: 1)
+    _open_scope(qapp, ctrl, [path])
+    ch = _tek_channel(tmp_path / "tek0000CH3.csv", np.ones(5000), dt=1e-6, t0=0.0)
+    monkeypatch.setattr(ctrl, "_ask_add_or_replace", lambda paths: "add")
+    assert ctrl.open_files([ch])
+    assert scope.wait_import()
+    assert wait(qapp, lambda: scope.active and len(scope.record.names) == 3)
+    wait(qapp, lambda: False, 0.2)
+    assert ctrl.tree_ctrl.items[("A", 2)][1].text() == "—"     # CH3 finit avant la fin
+    window.grab().save(str(SHOTS / "logger_picoscope.png"))
 
 
 def test_progress_dialog_cancel(setup, tmp_path):

@@ -484,6 +484,11 @@ class FFTController(QtCore.QObject):
         self.amp = self.averager.add(amp)
         self.signals = signals
         self._points = (fs, analog.shape[0])
+        missing = [self.cfg.analog_name(s) for j, s in enumerate(signals)
+                   if j < analog.shape[1] and not np.isfinite(analog[:, j]).all()]
+        if missing:                         # bases de temps différentes : voie hors zone
+            text = (text + " — " if text else "") + \
+                "voie(s) sans données sur toute la zone : " + ", ".join(missing)
         if self.zone_mode:
             reader = self.zone_reader_provider()
             self._zone_key = (self.zone_range(), id(reader)) if reader is not None else None

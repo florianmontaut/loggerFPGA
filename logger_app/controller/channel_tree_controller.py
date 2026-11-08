@@ -75,6 +75,8 @@ class ChannelTreeController(QtCore.QObject):
                                                       cfg.trigger_type.BELOW):
                     name += "  (seuil)"
                 self._channel(group[0], ("A", sig), name, cfg.unit(sig), pens.analog_color(sig))
+                if rank < len(cfg.channel_tips) and ("A", sig) in self.items:
+                    self.items[("A", sig)][0].setToolTip(cfg.channel_tips[rank])
         if cfg.has_logic:
             group = self._row("Voies logiques", "", "")
             root[0].appendRow(group)
@@ -136,6 +138,8 @@ class ChannelTreeController(QtCore.QObject):
             value = values.get(key)
             if value is None:
                 text = ""
+            elif value != value:                # NaN : hors de l'étendue de la voie
+                text = "—"
             elif key[0] == "L":
                 text = f"{int(value):+d}" if column == self.DELTA else f"{int(value)}"
             else:
