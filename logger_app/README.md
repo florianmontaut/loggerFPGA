@@ -514,6 +514,19 @@ PicoScope. *Affichage › Axes des ordonnées* :
 
 ![un axe d'ordonnées par voie](docs/capture_axes.png)
 
+### Voie mise en évidence
+
+La voie sélectionnée dans l'arborescence est mise en évidence sur son graphique (comme
+`highlight` du GLviewer) : sa courbe passe **au premier plan** et son trait à 2 px.
+Sélectionner une autre ligne (groupe, nom du logger ou du fichier) lui rend son aspect.
+
+* Avec plusieurs axes d'ordonnées, c'est toute l'échelle de la voie qui passe devant les
+  autres ; la souris reste gérée par le graphique (zoom, déplacement, curseurs).
+* La sélection se fait par l'arborescence seulement : rendre les courbes cliquables
+  ferait tester chaque clic contre des millions de points.
+* Coût mesuré du trait de 2 px, pour la seule courbe en évidence : environ 5 ms par
+  tracé d'une trame du logger, 15 ms à 200 000 points, 8 ms à 2 millions (enveloppe).
+
 ### Recaler des voies dans le temps
 
 Deux appareils déclenchés l'un par l'autre (un PicoScope par son entrée auxiliaire reliée
@@ -741,7 +754,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-223 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, exports PicoScope et bases de temps différentes, axes d'ordonnées multiples, recalage dans le temps, acquisition complète contre le
+224 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, exports PicoScope et bases de temps différentes, axes d'ordonnées multiples, recalage dans le temps, voie mise en évidence, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes

@@ -74,6 +74,10 @@ class LiveGraphController(QtCore.QObject):
         self._main_fitted = False
         self._seen: dict[int, tuple] = {}
         self._fitting = False
+        # voie sélectionnée dans l'arborescence, mise en évidence (highlight)
+        self.highlighted: tuple | None = None
+        self._highlight_curve = None
+        self._highlight_pen = None
         self._threshold_group: int | None = None   # axe de la ligne du seuil
         # décalage en X de courbes (aperçu d'un recalage, controller/align_controller.py)
         self.x_shift: dict[tuple, float] = {}
@@ -142,6 +146,8 @@ class LiveGraphController(QtCore.QObject):
                 curve = self.logic_plot.plot(pen=pens.pen(pens.logic_color(bit)))
                 curve.setVisible(("L", bit) not in self.hidden)
                 self.curves[("L", bit)] = curve
+            if self.highlighted is not None and self.highlighted[0] == "L":
+                self.highlight(self.highlighted)
             self.logic_plot.getAxis("left").setTicks(
                 [[(b + self.LOGIC_HEIGHT / 2, cfg.logic_name(b)) for b in range(16)]])
             zoom.limit_y(self.logic_plot.vb, -0.5, 16, margin=0.05)
@@ -231,6 +237,7 @@ class LiveGraphController(QtCore.QObject):
                 self.legend.addItem(curve, name)
             curve.setVisible(("A", sig) not in self.hidden)
             self.curves[("A", sig)] = curve
+        self.highlight(self.highlighted)        # courbes recréées
         if signals:
             max_gain = max(abs(cfg.gain(s)) for s in signals) or 1.0
             # échelle fixe de logger.m : multiple de 100 supérieur au gain maximal
@@ -349,6 +356,8 @@ class LiveGraphController(QtCore.QObject):
         unit = {item.unit for item in active}
         self.math_plot.setLabel("left", "Voies calculées",
                                 units=unit.pop() if len(unit) == 1 and active else None)
+        if self.highlighted is not None and self.highlighted[0] == "M":
+            self.highlight(self.highlighted)
         self.availability_changed.emit("math", bool(active))
         self._dirty = self.frame is not None
 
@@ -429,6 +438,33 @@ class LiveGraphController(QtCore.QObject):
         """Courbes tracées décalées en X ({clé : écart en s}) : aperçu d'un recalage."""
         self.x_shift = dict(shifts)
         self._dirty = self.frame is not None
+
+    # ------------------------------------------------------------------ mise en évidence
+    HIGHLIGHT_Z = 10
+    HIGHLIGHT_WIDTH = 2.0      # mesuré : + 5 ms par tracé de trame, pour cette seule courbe
+
+    def highlight(self, key):
+        """
+        Voie sélectionnée dans l'arborescence mise en évidence (comme
+        GraphController.highlight du GLviewer) : sa courbe passe au premier plan, trait
+        de 2 px. key None (ou sans courbe) : plus de voie en évidence.
+        """
+        curve = self._highlight_curve
+        if curve is not None and curve is self.curves.get(self.highlighted):
+            curve.setPen(self._highlight_pen)
+            curve.setZValue(0)
+        self.highlighted = key
+        self._highlight_curve = curve = self.curves.get(key)
+        group = self._group_of.get(key[1], 0) if curve is not None and key[0] == "A" else 0
+        for g, scale in enumerate(self.scales, start=1):
+            scale.set_raised(g == group)        # sa ViewBox au-dessus des autres
+        if curve is None:
+            return
+        self._highlight_pen = pg.mkPen(curve.opts["pen"])
+        pen = pg.mkPen(curve.opts["pen"])
+        pen.setWidthF(max(pen.widthF(), self.HIGHLIGHT_WIDTH))
+        curve.setPen(pen)
+        curve.setZValue(self.HIGHLIGHT_Z)
 
     def set_faded(self, keys, opacity: float = 0.25):
         """Courbes `keys` estompées, les autres opaques (ensemble vide : toutes opaques)."""

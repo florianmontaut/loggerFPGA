@@ -201,6 +201,7 @@ class MainController(QtCore.QObject):
         self.tree_ctrl.channel_selected.connect(self.cursor_ctrl.select_channel)
         self.graph_ctrl.fps_changed.connect(lambda fps: v.fpsLabel.setText(f"{fps:.0f} img/s"))
         self.tree_ctrl.visibility_changed.connect(self.graph_ctrl.set_visible)
+        self.tree_ctrl.current_changed.connect(self.graph_ctrl.highlight)
 
         # voies calculées : appliquées tout de suite, gardées dans la configuration
         self.math_ctrl.changed.connect(self._on_math_changed)

@@ -1708,3 +1708,72 @@ def test_align_channels_dialog(setup):
     dialog.list.item(0).setCheckState(QtCore.Qt.CheckState.Checked)
     dialog.shift_button.click()
     assert dialog.action == "shift" and dialog.names() == ["CH1"]
+
+
+def _select(ctrl, key):
+    tree = ctrl.tree_ctrl
+    index = tree.items[key][0].index() if key is not None else tree.model.item(0).index()
+    tree.view.setCurrentIndex(index)
+
+
+def test_highlight_selected_channel(setup, tmp_path, monkeypatch):
+    """Voie sélectionnée dans l'arborescence : au premier plan, trait de 2 px."""
+    from PyQt6 import QtGui
+    from PyQt6.QtTest import QTest
+    qapp, sim, window, ctrl = setup
+    graph = ctrl.graph_ctrl
+    # logger : voie analogique puis logique
+    first = ("A", graph.cfg.analog_signals[0])
+    _select(ctrl, first)
+    curve = graph.curves[first]
+    assert graph.highlighted == first and curve.zValue() == graph.HIGHLIGHT_Z
+    assert curve.opts["pen"].widthF() == 2.0
+    _select(ctrl, ("L", 3))
+    assert curve.zValue() == 0 and curve.opts["pen"].widthF() == 1.0
+    assert graph.curves[("L", 3)].zValue() == graph.HIGHLIGHT_Z
+    _select(ctrl, None)                                     # ligne du logger : plus rien
+    assert graph.highlighted is None and graph.curves[("L", 3)].zValue() == 0
+    assert graph.curves[("L", 3)].opts["pen"].widthF() == 1.0
+    # enregistrement d'oscilloscope, un axe par voie : la ViewBox de la voie passe devant
+    scope = _two_scopes(qapp, ctrl, tmp_path, monkeypatch)
+    main_z = graph.analog_plot.vb.zValue()
+    _select(ctrl, ("A", 2))
+    assert graph.curves[("A", 2)].opts["pen"].widthF() == 2.0
+    assert [s.vb.zValue() - main_z for s in graph.scales] == [-1, 1, -1]
+    window.grab().save(str(SHOTS / "logger_highlight.png"))
+    # la souris reste à la ViewBox principale : molette = zoom en X, échelles inchangées
+    view = window.analoggraph if hasattr(window, "analoggraph") else graph.analog_widget
+    center = view.mapFromScene(graph.analog_plot.vb.sceneBoundingRect().center())
+    ranges = [graph.analog_view(s).viewRange()[1] for s in range(4)]
+    x0, x1 = graph.analog_plot.vb.viewRange()[0]
+    for _ in range(4):
+        event = QtGui.QWheelEvent(
+            QtCore.QPointF(center), QtCore.QPointF(view.viewport().mapToGlobal(center)),
+            QtCore.QPoint(0, 0), QtCore.QPoint(0, 120), QtCore.Qt.MouseButton.NoButton,
+            QtCore.Qt.KeyboardModifier.NoModifier, QtCore.Qt.ScrollPhase.NoScrollPhase, False)
+        QtWidgets.QApplication.sendEvent(view.viewport(), event)
+    wait(qapp, lambda: False, 0.3)
+    z0, z1 = graph.analog_plot.vb.viewRange()[0]
+    assert z1 - z0 < 0.8 * (x1 - x0)
+    assert [graph.analog_view(s).viewRange()[1] for s in range(4)] == ranges
+    # glisser dans la zone de tracé : déplacement, toutes les échelles suivent
+    QTest.mousePress(view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=center)
+    for step in (10, 25, 40):
+        QTest.mouseMove(view.viewport(), center + QtCore.QPoint(step, step))
+        qapp.processEvents()
+    QTest.mouseRelease(view.viewport(), QtCore.Qt.MouseButton.LeftButton,
+                       pos=center + QtCore.QPoint(40, 40))
+    wait(qapp, lambda: False, 0.3)
+    moved = [graph.analog_view(s).viewRange()[1] for s in range(4)]
+    assert graph.analog_plot.vb.viewRange()[0][0] < z0
+    assert all(m[0] > r[0] for m, r in zip(moved, ranges))
+    # axes recréés (autre répartition) : la voie reste en évidence ; puis une autre voie
+    window.axisModeActions["single"].trigger()
+    assert graph.curves[("A", 2)].zValue() == graph.HIGHLIGHT_Z
+    assert graph.curves[("A", 2)].opts["pen"].widthF() == 2.0
+    window.axisModeActions["auto"].trigger()
+    assert [s.vb.zValue() - main_z for s in graph.scales] == [-1, 1, -1]
+    _select(ctrl, ("A", 0))
+    assert [s.vb.zValue() - main_z for s in graph.scales] == [-1, -1, -1]
+    assert graph.curves[("A", 2)].opts["pen"].widthF() == 1.0
+    scope.close()

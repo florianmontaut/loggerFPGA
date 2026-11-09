@@ -136,6 +136,29 @@ def fit_range(bounds: tuple[float, float]) -> tuple[float, float]:
     return y0 - margin, y1 + margin
 
 
+class ScaleViewBox(zoom.TimeViewBox):
+    """
+    ViewBox d'une échelle ajoutée : elle ne répond qu'à son axe (glissement ou molette
+    sur ses graduations, `axis` est alors précisé). Dans la zone de tracé, elle laisse la
+    souris à la ViewBox principale, même placée au-dessus d'elle (voie mise en évidence).
+    """
+
+    def mouseDragEvent(self, ev, axis=None):
+        if axis is None:
+            ev.ignore()
+        else:
+            super().mouseDragEvent(ev, axis=axis)
+
+    def wheelEvent(self, ev, axis=None):
+        if axis is None:
+            ev.ignore()
+        else:
+            super().wheelEvent(ev, axis=axis)
+
+    def mouseClickEvent(self, ev):
+        ev.ignore()
+
+
 class AxisScale:
     """Échelle d'un groupe de voies au-delà du premier : sa ViewBox et son axe."""
 
@@ -147,7 +170,7 @@ class AxisScale:
         self.a, self.b = 1.0, 0.0
         self.auto = True            # ajustée à ses courbes à chaque trame
         self.fitted = False
-        self.vb = zoom.TimeViewBox(enableMenu=False)
+        self.vb = ScaleViewBox(enableMenu=False)
         self.vb.setParentItem(plot)
         # sous la ViewBox principale : elle reçoit la souris (zoom, déplacement, menu)
         self.vb.setZValue(self.main_vb.zValue() - 1)
@@ -161,6 +184,10 @@ class AxisScale:
         plot.layout.setColumnFixedWidth(column, AXIS_WIDTH)
         self.main_vb.sigResized.connect(self._sync_geometry)
         self.vb.sigRangeChangedManually.connect(self._on_manual)
+
+    def set_raised(self, raised: bool):
+        """Au-dessus de la ViewBox principale (voie mise en évidence) ou dessous."""
+        self.vb.setZValue(self.main_vb.zValue() + (1 if raised else -1))
 
     def _sync_geometry(self):
         self.vb.setGeometry(self.main_vb.geometry())
