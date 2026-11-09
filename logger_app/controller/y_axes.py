@@ -148,10 +148,13 @@ def snap_fractions(count: int) -> list[float]:
 
 
 def snapped_fraction(fraction: float, count: int, tolerance: float) -> float | None:
-    """Repère à moins de `tolerance` (part de la hauteur) de `fraction`, sinon None."""
+    """
+    Repère à moins de `tolerance` (part de la hauteur) de `fraction`, sinon None : une
+    limite entre deux zones, ou le bas (0) ou le haut (1) du graphique.
+    """
     if count < 1:
         return None
-    k = min(max(round(fraction * (count + 1)), 1), count)
+    k = min(max(round(fraction * (count + 1)), 0), count + 1)
     target = k / (count + 1)
     return target if abs(fraction - target) <= tolerance else None
 
@@ -160,8 +163,9 @@ class SnapViewBox(zoom.TimeViewBox):
     """
     ViewBox dont le zéro s'aligne sur des repères quand on déplace son axe (glissement
     sur ses graduations) : le graphique est découpé en `snap_count` + 1 zones de même
-    hauteur, et le zéro se colle à la limite entre deux zones dont il s'approche à moins
-    de SNAP_PIXELS. Le déplacement reste libre ailleurs, et avec Maj enfoncée.
+    hauteur, et le zéro se colle à la limite entre deux zones, ou au bas ou au haut du
+    graphique, dont il s'approche à moins de SNAP_PIXELS. Le déplacement reste libre
+    ailleurs, et avec Maj enfoncée.
 
     Molette sur l'axe : si le zéro est sur un repère, il y reste (zoom autour de zéro).
     """

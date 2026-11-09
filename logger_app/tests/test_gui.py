@@ -1867,4 +1867,12 @@ def test_axis_zero_snaps_to_zone_limits(setup, tmp_path, monkeypatch):
     main.mouseDragEvent(_DragEvent(dy, start=True), axis=1)
     main.mouseDragEvent(_DragEvent(dy, finish=True), axis=1)
     assert main.zero_fraction() == pytest.approx(0.6, abs=1e-9)
+    # bas et haut du graphique : repères aussi (signal positif posé en bas)
+    for edge in (0.0, 1.0):
+        dy = -round((edge - main.zero_fraction()) * main.height()) + 6
+        main.mouseDragEvent(_DragEvent(dy, start=True), axis=1)
+        main.mouseDragEvent(_DragEvent(dy, finish=True), axis=1)
+        assert main.zero_fraction() == pytest.approx(edge, abs=1e-9) and main.zero_snapped()
+    lo, hi = main.viewRange()[1]
+    assert hi == pytest.approx(0.0, abs=1e-9 * (hi - lo)) and lo < -600    # zéro en haut
     scope.close()

@@ -519,14 +519,16 @@ PicoScope. *Affichage › Axes des ordonnées* :
 Pour ranger les voies les unes au-dessus des autres, le graphique analogique est découpé
 en N + 1 zones de même hauteur, N étant le nombre de voies analogiques chargées. Quand
 on déplace un axe (glisser sur ses graduations), son **zéro se colle** à la limite entre
-deux zones dès qu'il s'en approche à moins de 10 pixels.
+deux zones, ou au bas ou au haut du graphique, dès qu'il s'en approche à moins de
+10 pixels.
 
 * Les N limites s'affichent en pointillés pendant le déplacement.
 * Le déplacement reste libre ailleurs : le zéro se décolle dès que la souris s'éloigne
   du repère. Avec **Maj** enfoncée, l'aimantation est suspendue.
 * Molette sur un axe dont le zéro est sur un repère : le zéro y reste, seule l'échelle
   change (comme le calibre d'une voie d'oscilloscope).
-* Le haut et le bas du graphique ne sont pas des repères.
+* Le bas et le haut du graphique sont aussi des repères, sans pointillés : un signal
+  positif se pose en bas, un signal négatif en haut.
 
 ![zéro d'un axe collé sur une limite de zone](docs/capture_zeros_alignes.png)
 

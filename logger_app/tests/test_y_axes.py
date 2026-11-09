@@ -38,6 +38,8 @@ def test_snap_fractions():
     assert y_axes.snap_fractions(1) == [0.5]
     assert y_axes.snapped_fraction(0.41, 4, 0.02) == 0.4
     assert y_axes.snapped_fraction(0.45, 4, 0.02) is None
-    assert y_axes.snapped_fraction(0.01, 4, 0.02) is None       # bords : pas des repères
-    assert y_axes.snapped_fraction(0.99, 4, 0.02) is None
+    assert y_axes.snapped_fraction(0.01, 4, 0.02) == 0.0        # bas et haut du graphique
+    assert y_axes.snapped_fraction(0.99, 4, 0.02) == 1.0
+    assert y_axes.snapped_fraction(-0.015, 4, 0.02) == 0.0
+    assert y_axes.snapped_fraction(1.05, 4, 0.02) is None
     assert y_axes.snapped_fraction(0.5, 0, 0.02) is None
