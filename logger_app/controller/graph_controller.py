@@ -68,6 +68,12 @@ class LiveGraphController(QtCore.QObject):
         self.scales: list[y_axes.AxisScale] = []   # axes au-delà du premier
         self._group_of: dict[int, int] = {}
         self._bounds: dict[int, tuple] = {}        # étendue des courbes visibles par axe
+        # enregistrement d'oscilloscope : échelles ajustées une fois puis tenues (elles ne
+        # bougent pas quand la portion affichée change), limites sur tout ce qui a été vu
+        self.hold_scales = False
+        self._main_fitted = False
+        self._seen: dict[int, tuple] = {}
+        self._fitting = False
         self._threshold_group: int | None = None   # axe de la ligne du seuil
         # décalage en X de courbes (aperçu d'un recalage, controller/align_controller.py)
         self.x_shift: dict[tuple, float] = {}
@@ -75,13 +81,15 @@ class LiveGraphController(QtCore.QObject):
         self._fps_t0 = time.perf_counter()
 
         self.left_axis = y_axes.MainAxis("left")
-        self.analog_plot = pg.PlotItem(axisItems={"left": self.left_axis})
+        self.analog_plot = pg.PlotItem(viewBox=zoom.TimeViewBox(),
+                                       axisItems={"left": self.left_axis})
         y_axes.reserve_columns(self.analog_plot)
         self.analog_plot.vb.sigYRangeChanged.connect(self._on_main_y_changed)
         self.analog_plot.vb.sigRangeChangedManually.connect(self._on_main_manual)
         self.analog_plot.autoBtn.clicked.connect(self._on_auto_button)
         self.logic_plot = pg.PlotItem()
-        self.math_plot = pg.PlotItem()          # voies calculées, axe des temps commun
+        # voies calculées, axe des temps commun
+        self.math_plot = pg.PlotItem(viewBox=zoom.TimeViewBox())
         for plot in (self.analog_plot, self.logic_plot, self.math_plot):
             plot.showGrid(x=True, y=True, alpha=0.3)
             plot.setDownsampling(auto=True, mode="peak")
@@ -173,6 +181,7 @@ class LiveGraphController(QtCore.QObject):
         for scale in self.scales:
             scale.remove()
         self.scales, self.groups, self._group_of, self._bounds = [], [], {}, {}
+        self._seen, self._main_fitted = {}, False
 
     def _remove_from_view(self, item, group: int):
         if group == 0:
@@ -189,6 +198,7 @@ class LiveGraphController(QtCore.QObject):
     def _build_analog(self, cfg: LoggerConfig):
         """Axes (controller/y_axes.py), courbes des voies analogiques, ligne du seuil."""
         signals = cfg.analog_signals
+        self.hold_scales = cfg.record_points > 0
         mode = self.axis_mode
         if mode == "auto":      # enregistrement d'oscilloscope : calibres différents
             mode = "channel" if cfg.record_points else "single"
@@ -263,7 +273,7 @@ class LiveGraphController(QtCore.QObject):
         déplacement du graphique), sauf échelle automatique ou action sur l'axe seul.
         """
         follow = (not self.analog_plot.vb.autoRangeEnabled()[1]
-                  and not self.left_axis.direct)
+                  and not self.left_axis.direct and not self._fitting)
         for scale in self.scales:
             if follow:
                 scale.follow()
@@ -296,13 +306,28 @@ class LiveGraphController(QtCore.QObject):
     def _on_auto_button(self):
         """Bouton « A » du graphique : tous les axes de nouveau ajustés à leurs courbes."""
         if self.auto_range:
+            self._main_fitted = False
             for scale in self.scales:
-                scale.auto = True
+                scale.auto, scale.fitted = True, False
+            if self.hold_scales:
+                self.analog_plot.disableAutoRange(axis="y")
             self._fit_scales()
 
     def _fit_scales(self):
+        """
+        Axes ajustés à leurs courbes : à chaque trame (échelle automatique du logger), ou
+        une seule fois (enregistrement d'oscilloscope, échelles tenues).
+        """
+        if (self.hold_scales and self.auto_range and not self._main_fitted
+                and self.frame is not None and 0 in self._bounds):
+            self._fitting = True                 # les autres échelles ne suivent pas
+            try:
+                self.analog_plot.vb.setYRange(*y_axes.fit_range(self._bounds[0]), padding=0)
+            finally:
+                self._fitting = False
+            self._main_fitted = True
         for g, scale in enumerate(self.scales, start=1):
-            if scale.auto or not scale.fitted:
+            if not scale.fitted or (scale.auto and not self.hold_scales):
                 scale.fit(self._bounds.get(g))
 
     # ------------------------------------------------------------------ voies calculées
@@ -336,6 +361,7 @@ class LiveGraphController(QtCore.QObject):
 
     def set_auto_range(self, enabled: bool):
         self.auto_range = enabled
+        self._main_fitted = False
         for scale in self.scales:
             scale.auto, scale.fitted = enabled, False
         self._update_y_limits()
@@ -349,8 +375,8 @@ class LiveGraphController(QtCore.QObject):
         cfg, frame = self.cfg, self.frame
         if cfg is None:
             return
-        # plusieurs axes : large marge, pour réduire une échelle et séparer les courbes
-        margin = zoom.ZOOM_OUT_MARGIN if len(self.groups) <= 1 else 5.0
+        # plusieurs axes ou échelles tenues : position libre, pour décaler une voie
+        free = len(self.groups) > 1 or self.hold_scales
         self._bounds = {}
         for g, group in enumerate(self.groups):
             arrays = []
@@ -366,7 +392,14 @@ class LiveGraphController(QtCore.QObject):
             span = zoom.bounds(*arrays)
             if span is not None:
                 self._bounds[g] = span
-                zoom.limit_y(self.analog_view(group[0]), *span, margin=margin)
+                view = self.analog_view(group[0])
+                if not free:
+                    zoom.limit_y(view, *span)
+                    continue
+                if self.hold_scales and frame is not None:   # stables d'une portion à l'autre
+                    seen = self._seen.get(g, span)
+                    span = self._seen[g] = (min(seen[0], span[0]), max(seen[1], span[1]))
+                zoom.limit_y_free(view, *span)
         results = math_results if math_results is not None else (
             self.math_results() if frame is not None else {})
         visible = [y for name, y in results.items() if ("M", name) not in self.hidden]
@@ -376,7 +409,9 @@ class LiveGraphController(QtCore.QObject):
     def _apply_y_range(self):
         if self.cfg is None or not self.cfg.analog_signals:
             return
-        if self.auto_range:
+        if self.auto_range and self.hold_scales:
+            self.analog_plot.disableAutoRange(axis="y")
+        elif self.auto_range:
             self.analog_plot.enableAutoRange(axis="y")
         else:
             self.analog_plot.disableAutoRange(axis="y")

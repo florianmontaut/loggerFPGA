@@ -1371,7 +1371,14 @@ def test_zoom_limits_scope_record(setup, tmp_path, monkeypatch):
     rec = ctrl.scope_ctrl.record
     assert x0 >= rec.t0 - 0.051 * rec.duration and x1 <= rec.t0 + 1.051 * rec.duration
     y0, y1 = vb.viewRange()[1]
-    assert max(abs(y0), abs(y1)) < 0.004                  # signal de 2 mV
+    # signal de ±2 mV : dézoom de 50 fois l'étendue au plus, position libre
+    assert y1 - y0 == pytest.approx(50 * 0.004, rel=0.02)
+    vb.setYRange(-0.198, 0.002, padding=0)               # courbe en haut de l'écran
+    qapp.processEvents()
+    assert vb.viewRange()[1] == pytest.approx([-0.198, 0.002], abs=1e-4)
+    vb.setYRange(-0.002, 0.198, padding=0)               # ou en bas
+    qapp.processEvents()
+    assert vb.viewRange()[1] == pytest.approx([-0.002, 0.198], abs=1e-4)
     _wheel(qapp, vb, 1 / 3)                               # zoom avant : signal en mV
     window.grab()
     assert vb.viewRange()[1][1] - vb.viewRange()[1][0] < 1e-4
@@ -1528,6 +1535,22 @@ def _two_scopes(qapp, ctrl, tmp_path, monkeypatch, offset=4.5e-6):
     return scope
 
 
+class _WheelEvent:
+    """Molette au centre d'une ViewBox (ViewBox.wheelEvent : delta, pos, accept)."""
+
+    def __init__(self, vb, delta):
+        self._delta, self._pos = delta, vb.boundingRect().center()
+
+    def delta(self):
+        return self._delta
+
+    def pos(self):
+        return self._pos
+
+    def accept(self):
+        pass
+
+
 def _edge_time(curve, level):
     x, y = curve.getData()
     return float(x[np.argmax(y > level)])
@@ -1553,7 +1576,41 @@ def test_scope_y_axes(setup, tmp_path, monkeypatch):
     left = scope.overview_plot.layout.getContentsMargins()[0]
     assert left == 1 + y_axes.AXIS_WIDTH
     window.grab().save(str(SHOTS / "logger_axes.png"))
-    # zoom à la souris (zone de tracé) : toutes les échelles suivent
+    # molette dans la zone de tracé : zoom en X seulement, aucune échelle ne bouge
+    views = [graph.analog_view(s) for s in range(4)]
+    ranges = [v.viewRange()[1] for v in views]
+    x_before = graph.analog_plot.vb.viewRange()[0]
+    for _ in range(8):
+        graph.analog_plot.vb.wheelEvent(_WheelEvent(graph.analog_plot.vb, 120))
+    assert wait(qapp, lambda: graph.frame.n_samples < 10_000)       # portion relue
+    wait(qapp, lambda: False, 0.2)
+    x_after = graph.analog_plot.vb.viewRange()[0]
+    assert x_after[1] - x_after[0] < 0.5 * (x_before[1] - x_before[0])
+    assert [v.viewRange()[1] for v in views] == ranges
+    # molette sur un axe : son échelle seule ; dézoom borné, position libre (voie en haut)
+    axis_vb = graph.analog_view(2)                              # A : 0 à 15 V
+    for _ in range(80):
+        axis_vb.wheelEvent(_WheelEvent(axis_vb, -120), axis=1)
+    lo, hi = axis_vb.viewRange()[1]
+    assert 300 < hi - lo <= 50 * 15.01
+    assert [v.viewRange()[1] for v in views[:2]] == ranges[:2]
+    axis_vb.setYRange(15 - (hi - lo), 15, padding=0)
+    assert axis_vb.viewRange()[1] == pytest.approx([15 - (hi - lo), 15])
+    axis_vb.setYRange(0, hi - lo, padding=0)                    # ou en bas
+    assert axis_vb.viewRange()[1] == pytest.approx([0, hi - lo])
+    # « A » : axes recadrés sur la portion affichée (A y vaut 15 V), puis de nouveau tenus
+    graph.analog_plot.autoBtn.clicked.emit(graph.analog_plot.autoBtn)
+    assert not graph.analog_plot.vb.autoRangeEnabled()[1]
+    lo, hi = axis_vb.viewRange()[1]
+    assert lo < 15 < hi and hi - lo < 16
+    # tout l'enregistrement puis « Échelle auto » : échelles d'origine
+    graph.analog_plot.setXRange(*x_before, padding=0)
+    assert wait(qapp, lambda: graph.frame.n_samples > 15_000)
+    wait(qapp, lambda: False, 0.2)
+    assert hi - lo == pytest.approx(np.diff(axis_vb.viewRange()[1])[0])   # tenue
+    graph.set_auto_range(True)
+    assert axis_vb.viewRange()[1] == pytest.approx(ranges[2], rel=0.05, abs=0.1)
+    # déplacement dans la zone de tracé : toutes les échelles suivent
     before = graph.analog_view(2).viewRange()[1]
     graph.analog_plot.vb.sigRangeChangedManually.emit([False, True])
     graph.analog_plot.vb.setYRange(0, 300, padding=0)
