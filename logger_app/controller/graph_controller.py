@@ -78,6 +78,7 @@ class LiveGraphController(QtCore.QObject):
         self.highlighted: tuple | None = None
         self._highlight_curve = None
         self._highlight_pen = None
+        self.snap_guides: list[pg.InfiniteLine] = []
         self._threshold_group: int | None = None   # axe de la ligne du seuil
         # décalage en X de courbes (aperçu d'un recalage, controller/align_controller.py)
         self.x_shift: dict[tuple, float] = {}
@@ -85,7 +86,7 @@ class LiveGraphController(QtCore.QObject):
         self._fps_t0 = time.perf_counter()
 
         self.left_axis = y_axes.MainAxis("left")
-        self.analog_plot = pg.PlotItem(viewBox=zoom.TimeViewBox(),
+        self.analog_plot = pg.PlotItem(viewBox=y_axes.SnapViewBox(),
                                        axisItems={"left": self.left_axis})
         y_axes.reserve_columns(self.analog_plot)
         self.analog_plot.vb.sigYRangeChanged.connect(self._on_main_y_changed)
@@ -238,6 +239,11 @@ class LiveGraphController(QtCore.QObject):
             curve.setVisible(("A", sig) not in self.hidden)
             self.curves[("A", sig)] = curve
         self.highlight(self.highlighted)        # courbes recréées
+        # repères d'alignement des zéros : une limite de zone par voie (y_axes.SnapViewBox)
+        for view in [self.analog_plot.vb] + [scale.vb for scale in self.scales]:
+            view.snap_count = len(signals)
+            view.on_axis_drag = self._show_snap_guides
+        self._show_snap_guides(False)
         if signals:
             max_gain = max(abs(cfg.gain(s)) for s in signals) or 1.0
             # échelle fixe de logger.m : multiple de 100 supérieur au gain maximal
@@ -286,6 +292,7 @@ class LiveGraphController(QtCore.QObject):
                 scale.follow()
             else:
                 scale.store_relation()
+        self._place_snap_guides()
         self.y_scales_changed.emit()
 
     def to_main(self, sig: int | None, y: float) -> float:
@@ -438,6 +445,28 @@ class LiveGraphController(QtCore.QObject):
         """Courbes tracées décalées en X ({clé : écart en s}) : aperçu d'un recalage."""
         self.x_shift = dict(shifts)
         self._dirty = self.frame is not None
+
+    # ------------------------------------------------------------------ repères des zéros
+    def _show_snap_guides(self, shown: bool):
+        """Repères d'alignement des zéros, affichés pendant le déplacement d'un axe."""
+        count = len(self.cfg.analog_signals) if shown and self.cfg is not None else 0
+        while len(self.snap_guides) < count:
+            line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(
+                "#9aa", width=1, style=QtCore.Qt.PenStyle.DotLine))
+            line.setZValue(-5)
+            self.analog_plot.addItem(line, ignoreBounds=True)
+            self.snap_guides.append(line)
+        for k, line in enumerate(self.snap_guides):
+            line.setVisible(k < count)
+        self._place_snap_guides()
+
+    def _place_snap_guides(self):
+        visible = [line for line in self.snap_guides if line.isVisible()]
+        if not visible:
+            return
+        y0, y1 = self.analog_plot.vb.viewRange()[1]
+        for line, fraction in zip(visible, y_axes.snap_fractions(len(visible))):
+            line.setValue(y0 + fraction * (y1 - y0))
 
     # ------------------------------------------------------------------ mise en évidence
     HIGHLIGHT_Z = 10

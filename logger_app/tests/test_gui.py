@@ -1777,3 +1777,102 @@ def test_highlight_selected_channel(setup, tmp_path, monkeypatch):
     assert [s.vb.zValue() - main_z for s in graph.scales] == [-1, -1, -1]
     assert graph.curves[("A", 2)].opts["pen"].widthF() == 1.0
     scope.close()
+
+
+class _DragEvent:
+    """Glissement sur un axe (ViewBox.mouseDragEvent) : de `down` à `pos`, en pixels."""
+
+    def __init__(self, dy, start=False, finish=False, shift=False):
+        self._dy, self._start, self._finish, self._shift = dy, start, finish, shift
+
+    def button(self):
+        return QtCore.Qt.MouseButton.LeftButton
+
+    def buttonDownPos(self, *_):
+        return QtCore.QPointF(0, 0)
+
+    def pos(self):
+        return QtCore.QPointF(0, self._dy)
+
+    def lastPos(self):
+        return QtCore.QPointF(0, self._dy)
+
+    def modifiers(self):
+        mod = QtCore.Qt.KeyboardModifier
+        return mod.ShiftModifier if self._shift else mod.NoModifier
+
+    def isStart(self):
+        return self._start
+
+    def isFinish(self):
+        return self._finish
+
+    def accept(self):
+        pass
+
+
+def test_axis_zero_snaps_to_zone_limits(setup, tmp_path, monkeypatch):
+    """Axe déplacé : son zéro se colle aux limites des N + 1 zones du graphique."""
+    from PyQt6.QtTest import QTest
+    qapp, sim, window, ctrl = setup
+    graph = ctrl.graph_ctrl
+    scope = _two_scopes(qapp, ctrl, tmp_path, monkeypatch)       # 4 voies : 4 repères
+    vb = graph.analog_view(2)                                    # A, 0 à 15 V, axe à droite
+    assert vb.snap_count == 4 and graph.analog_plot.vb.snap_count == 4
+    height = vb.height()
+    others = [graph.analog_view(s).viewRange()[1] for s in (0, 1, 3)]
+    start = vb.zero_fraction()
+    assert 0 < start < 0.05 and not vb.zero_snapped()
+    # vrai glissement sur les graduations de l'axe : le zéro monte vers le repère 0,2
+    view = graph.analog_widget
+    axis = graph.scales[1].axis
+    down = view.mapFromScene(axis.sceneBoundingRect().center())
+    to_line = round((0.2 - start) * height)
+    QTest.mousePress(view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=down)
+    for dy in (5, 12, to_line - 6):                              # 6 px avant le repère
+        QTest.mouseMove(view.viewport(), down - QtCore.QPoint(0, dy))
+        qapp.processEvents()
+    assert vb.zero_fraction() == pytest.approx(0.2, abs=1e-9) and vb.zero_snapped()
+    assert [line.isVisible() for line in graph.snap_guides] == [True] * 4
+    window.grab().save(str(SHOTS / "logger_zeros_alignes.png"))
+    m0, m1 = graph.analog_plot.vb.viewRange()[1]
+    assert [line.value() for line in graph.snap_guides] == pytest.approx(
+        [m0 + f * (m1 - m0) for f in (0.2, 0.4, 0.6, 0.8)])
+    QTest.mouseMove(view.viewport(), down - QtCore.QPoint(0, to_line + 7))
+    qapp.processEvents()                                         # 7 px après : encore collé
+    assert vb.zero_fraction() == pytest.approx(0.2, abs=1e-9)
+    QTest.mouseMove(view.viewport(), down - QtCore.QPoint(0, to_line + 40))
+    qapp.processEvents()                                         # plus loin : libre
+    assert vb.zero_fraction() == pytest.approx(0.2 + 40 / height, abs=2 / height)
+    QTest.mouseMove(view.viewport(), down - QtCore.QPoint(0, to_line + 3))
+    QTest.mouseRelease(view.viewport(), QtCore.Qt.MouseButton.LeftButton,
+                       pos=down - QtCore.QPoint(0, to_line + 3))
+    qapp.processEvents()
+    assert vb.zero_snapped() and not any(line.isVisible() for line in graph.snap_guides)
+    span = np.diff(vb.viewRange()[1])[0]
+    assert span == pytest.approx(15.9, rel=0.01)                 # échelle inchangée
+    assert [graph.analog_view(s).viewRange()[1] for s in (0, 1, 3)] == others
+    # molette sur l'axe : le zéro reste sur son repère
+    vb.wheelEvent(_WheelEvent(vb, -240), axis=1)
+    assert np.diff(vb.viewRange()[1])[0] > 1.5 * span and vb.zero_snapped()
+    assert vb.zero_fraction() == pytest.approx(0.2, abs=1e-9)
+    # Maj : déplacement libre même près d'un repère
+    vb.mouseDragEvent(_DragEvent(-4, start=True, shift=True), axis=1)
+    vb.mouseDragEvent(_DragEvent(-4, finish=True, shift=True), axis=1)
+    assert vb.zero_fraction() == pytest.approx(0.2 + 4 / height, abs=1e-6)
+    assert not vb.zero_snapped()
+    # axe principal (CH1) : même aimantation, sur le repère le plus proche
+    main = graph.analog_plot.vb
+    dy = -round((0.6 - main.zero_fraction()) * main.height()) + 5
+    main.mouseDragEvent(_DragEvent(dy, start=True), axis=1)
+    main.mouseDragEvent(_DragEvent(dy, finish=True), axis=1)
+    assert main.zero_fraction() == pytest.approx(0.6, abs=1e-9)
+    # bas et haut du graphique : repères aussi (signal positif posé en bas)
+    for edge in (0.0, 1.0):
+        dy = -round((edge - main.zero_fraction()) * main.height()) + 6
+        main.mouseDragEvent(_DragEvent(dy, start=True), axis=1)
+        main.mouseDragEvent(_DragEvent(dy, finish=True), axis=1)
+        assert main.zero_fraction() == pytest.approx(edge, abs=1e-9) and main.zero_snapped()
+    lo, hi = main.viewRange()[1]
+    assert hi == pytest.approx(0.0, abs=1e-9 * (hi - lo)) and lo < -600    # zéro en haut
+    scope.close()

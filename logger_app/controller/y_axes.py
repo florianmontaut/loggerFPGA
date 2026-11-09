@@ -23,6 +23,7 @@ axe dans une colonne ajoutée à la mise en page du PlotItem.
 from __future__ import annotations
 
 import pyqtgraph as pg
+from PyQt6 import QtCore
 
 from ressources import zoom
 
@@ -32,6 +33,7 @@ LEFT_COLUMNS = 3            # colonnes réservées à gauche de l'axe principal
 RIGHT_COLUMNS = 4           # colonnes à droite du graphique
 MAIN_COLUMN = LEFT_COLUMNS  # colonne de l'axe de gauche du PlotItem après reserve_columns
 FIT_MARGIN = 0.03           # marge de l'ajustement aux données, en part de l'étendue
+SNAP_PIXELS = 10            # le zéro d'un axe déplacé se colle à un repère à moins de 10 px
 
 # modes de répartition (menu Affichage) ; "auto" : par voie pour un enregistrement
 # d'oscilloscope, axe unique pour le logger
@@ -136,7 +138,94 @@ def fit_range(bounds: tuple[float, float]) -> tuple[float, float]:
     return y0 - margin, y1 + margin
 
 
-class ScaleViewBox(zoom.TimeViewBox):
+def snap_fractions(count: int) -> list[float]:
+    """
+    Repères d'alignement des zéros : le graphique est découpé en count + 1 zones de même
+    hauteur, les repères sont les count limites entre deux zones (part de la hauteur,
+    depuis le bas).
+    """
+    return [k / (count + 1) for k in range(1, count + 1)]
+
+
+def snapped_fraction(fraction: float, count: int, tolerance: float) -> float | None:
+    """
+    Repère à moins de `tolerance` (part de la hauteur) de `fraction`, sinon None : une
+    limite entre deux zones, ou le bas (0) ou le haut (1) du graphique.
+    """
+    if count < 1:
+        return None
+    k = min(max(round(fraction * (count + 1)), 0), count + 1)
+    target = k / (count + 1)
+    return target if abs(fraction - target) <= tolerance else None
+
+
+class SnapViewBox(zoom.TimeViewBox):
+    """
+    ViewBox dont le zéro s'aligne sur des repères quand on déplace son axe (glissement
+    sur ses graduations) : le graphique est découpé en `snap_count` + 1 zones de même
+    hauteur, et le zéro se colle à la limite entre deux zones, ou au bas ou au haut du
+    graphique, dont il s'approche à moins de SNAP_PIXELS. Le déplacement reste libre
+    ailleurs, et avec Maj enfoncée.
+
+    Molette sur l'axe : si le zéro est sur un repère, il y reste (zoom autour de zéro).
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.snap_count = 0             # nombre de repères (voies analogiques)
+        self.on_axis_drag = None        # appelé avec True au début, False à la fin
+        self._drag_range = None         # plage au début du glissement
+
+    def zero_fraction(self) -> float:
+        """Position du zéro, en part de la hauteur depuis le bas."""
+        y0, y1 = self.viewRange()[1]
+        return -y0 / (y1 - y0) if y1 != y0 else 0.0
+
+    def zero_snapped(self) -> bool:
+        tolerance = 0.5 / max(self.height(), 1.0)
+        return snapped_fraction(self.zero_fraction(), self.snap_count, tolerance) is not None
+
+    def mouseDragEvent(self, ev, axis=None):
+        left = ev.button() == QtCore.Qt.MouseButton.LeftButton
+        if axis != 1 or not left or not self.state["mouseEnabled"][1]:
+            super().mouseDragEvent(ev, axis=axis)
+            return
+        ev.accept()
+        if ev.isStart() or self._drag_range is None:
+            self._drag_range = tuple(self.viewRange()[1])
+            if self.on_axis_drag:
+                self.on_axis_drag(True)
+        y0, y1 = self._drag_range
+        span, height = y1 - y0, max(self.height(), 1.0)
+        # déplacement depuis le début du glissement (et non pas à pas) : le zéro collé
+        # se décolle dès que la souris s'éloigne du repère
+        moved = ev.pos().y() - ev.buttonDownPos().y()
+        y0 += moved * span / height
+        free = bool(ev.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        target = None if free else snapped_fraction(-y0 / span, self.snap_count,
+                                                    SNAP_PIXELS / height)
+        if target is not None:
+            y0 = -target * span
+        self._resetTarget()
+        self.setYRange(y0, y0 + span, padding=0)
+        self.sigRangeChangedManually.emit(self.state["mouseEnabled"])
+        if ev.isFinish():
+            self._drag_range = None
+            if self.on_axis_drag:
+                self.on_axis_drag(False)
+
+    def wheelEvent(self, ev, axis=None):
+        if axis != 1 or not self.state["mouseEnabled"][1] or not self.zero_snapped():
+            super().wheelEvent(ev, axis=axis)
+            return
+        scale = 1.02 ** (ev.delta() * self.state["wheelScaleFactor"])
+        self._resetTarget()
+        self.scaleBy(y=scale, center=pg.Point(0, 0))
+        ev.accept()
+        self.sigRangeChangedManually.emit([False, True])
+
+
+class ScaleViewBox(SnapViewBox):
     """
     ViewBox d'une échelle ajoutée : elle ne répond qu'à son axe (glissement ou molette
     sur ses graduations, `axis` est alors précisé). Dans la zone de tracé, elle laisse la
