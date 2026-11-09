@@ -514,6 +514,22 @@ PicoScope. *Affichage › Axes des ordonnées* :
 
 ![un axe d'ordonnées par voie](docs/capture_axes.png)
 
+### Aligner les zéros des axes
+
+Pour ranger les voies les unes au-dessus des autres, le graphique analogique est découpé
+en N + 1 zones de même hauteur, N étant le nombre de voies analogiques chargées. Quand
+on déplace un axe (glisser sur ses graduations), son **zéro se colle** à la limite entre
+deux zones dès qu'il s'en approche à moins de 10 pixels.
+
+* Les N limites s'affichent en pointillés pendant le déplacement.
+* Le déplacement reste libre ailleurs : le zéro se décolle dès que la souris s'éloigne
+  du repère. Avec **Maj** enfoncée, l'aimantation est suspendue.
+* Molette sur un axe dont le zéro est sur un repère : le zéro y reste, seule l'échelle
+  change (comme le calibre d'une voie d'oscilloscope).
+* Le haut et le bas du graphique ne sont pas des repères.
+
+![zéro d'un axe collé sur une limite de zone](docs/capture_zeros_alignes.png)
+
 ### Voie mise en évidence
 
 La voie sélectionnée dans l'arborescence est mise en évidence sur son graphique (comme
@@ -754,7 +770,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-224 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, exports PicoScope et bases de temps différentes, axes d'ordonnées multiples, recalage dans le temps, voie mise en évidence, acquisition complète contre le
+226 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, exports PicoScope et bases de temps différentes, axes d'ordonnées multiples, recalage dans le temps, voie mise en évidence, alignement des zéros, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes

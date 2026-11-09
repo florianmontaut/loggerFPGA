@@ -31,3 +31,13 @@ def test_columns_left_then_right():
         assert len(left) == (count + 1) // 2 and len(left) <= 4 and len(right) <= 4
         assert left[0] == y_axes.MAIN_COLUMN and all(c < y_axes.MAIN_COLUMN for c in left[1:])
         assert all(c > y_axes.MAIN_COLUMN + 1 for c in right)
+
+
+def test_snap_fractions():
+    assert y_axes.snap_fractions(4) == [0.2, 0.4, 0.6, 0.8]      # 5 zones, 4 limites
+    assert y_axes.snap_fractions(1) == [0.5]
+    assert y_axes.snapped_fraction(0.41, 4, 0.02) == 0.4
+    assert y_axes.snapped_fraction(0.45, 4, 0.02) is None
+    assert y_axes.snapped_fraction(0.01, 4, 0.02) is None       # bords : pas des repères
+    assert y_axes.snapped_fraction(0.99, 4, 0.02) is None
+    assert y_axes.snapped_fraction(0.5, 0, 0.02) is None
