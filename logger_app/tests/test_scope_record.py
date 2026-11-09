@@ -294,3 +294,39 @@ def test_append_picoscope_to_tek(tmp_path):
     assert rec.names == ["CH1", "A"] and not rec.uniform
     assert np.nanmax(rec.read_window(0, 1000).data["A"]) == pytest.approx(2.0)
     rec.close()
+
+
+def test_time_shift(tmp_path):
+    """Recalage : attribut time_shift, données intactes, conservé à l'ajout de voies."""
+    from pico_files import pico_h5
+    a = tek_csv(tmp_path / "a.csv", [np.arange(10_000.0), np.zeros(10_000)])
+    h5_path = sr.import_tek_csv([a], str(tmp_path / "rec.h5"))
+    rec = sr.ScopeRecord(h5_path)
+    assert rec.uniform and rec.shifts == {"CH1": 0.0, "CH2": 0.0}
+    t0 = rec.timebases["CH2"].t0
+    rec.close()
+    sr.set_time_shifts(h5_path, {"CH2": 4.5e-6})
+    rec = sr.ScopeRecord(h5_path)
+    assert rec.shifts["CH2"] == pytest.approx(4.5e-6) and not rec.uniform
+    assert rec.timebases["CH2"].t0 == pytest.approx(t0 + 4.5e-6)
+    assert rec.timebases["CH1"].t0 == pytest.approx(t0)
+    rec.close()
+    with h5py.File(h5_path, "r") as h5:
+        assert h5["signals/CH2"].attrs["time_origin"] == pytest.approx(t0)   # origine gardée
+        assert h5.attrs["mixed_timebase"]
+        np.testing.assert_allclose(h5["signals/CH1/raw/value"][:5], np.arange(5.0))
+    # voie ajoutée d'un autre fichier : son nom de fichier, le décalage existant est gardé
+    pico = pico_h5(tmp_path / "p.h5", {"A": [(np.ones(8000), T0, 5e-7)]})
+    sr.append_to_workspace(h5_path, [pico], waveforms={os.path.abspath(pico): 0})
+    rec = sr.ScopeRecord(h5_path)
+    assert rec.shifts["CH2"] == pytest.approx(4.5e-6) and rec.shifts["A"] == 0.0
+    assert rec.sources["A"] == "p.h5"
+    rec.close()
+    # remise à zéro, voie inconnue
+    sr.set_time_shifts(h5_path, {"CH2": 0.0})
+    with h5py.File(h5_path, "r") as h5:
+        assert "time_shift" not in h5["signals/CH2"].attrs
+    with pytest.raises(sr.ScopeError):
+        sr.set_time_shifts(h5_path, {"XX": 1e-6})
+    with pytest.raises(sr.ScopeError):
+        sr.set_time_shifts(str(tmp_path / "absent.h5"), {"CH1": 1e-6})

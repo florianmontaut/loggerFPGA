@@ -92,6 +92,9 @@ class CursorController(QtCore.QObject):
         self.readout.hide()
 
         self.graph.redrawn.connect(self.refresh)
+        # plusieurs axes d'ordonnées : y1 / y2 se lisent sur l'axe de la voie de mesure
+        self.graph.y_scales_changed.connect(self._place_h_lines)
+        self.graph.axes_changed.connect(self._place_h_lines)
 
     @staticmethod
     def _line(angle, pen, label):
@@ -174,10 +177,24 @@ class CursorController(QtCore.QObject):
                 for line, value in zip(lines, t):
                     self._show(plots[panel], line, self.vertical)
                     line.setValue(value)
-            y = (self.p("Horizontaux", "y1").value(), self.p("Horizontaux", "y2").value())
-            for line, value in zip(self.h_lines, y):
+            for line in self.h_lines:
                 self._show(self.graph.analog_plot, line, self.horizontal)
-                line.setValue(value)
+        finally:
+            self._syncing = False
+        self._place_h_lines()
+
+    def _place_h_lines(self, *_):
+        """
+        Curseurs horizontaux à la hauteur de y1 / y2 sur l'axe de la voie de mesure (les
+        lignes sont dans la vue principale, seule à recevoir la souris).
+        """
+        if self._syncing or not self.horizontal:
+            return
+        self._syncing = True
+        try:
+            sig = self._signal()
+            for line, name in zip(self.h_lines, ("y1", "y2")):
+                line.setValue(self.graph.to_main(sig, self.p("Horizontaux", name).value()))
         finally:
             self._syncing = False
 
@@ -208,7 +225,8 @@ class CursorController(QtCore.QObject):
             return
         self._syncing = True
         try:
-            self.p("Horizontaux", f"y{i + 1}").setValue(line.value())
+            self.p("Horizontaux", f"y{i + 1}").setValue(
+                self.graph.from_main(self._signal(), line.value()))
         finally:
             self._syncing = False
         self.refresh()
@@ -236,7 +254,7 @@ class CursorController(QtCore.QObject):
         if self.horizontal and self.p("Horizontaux", "y1").value() == \
                 self.p("Horizontaux", "y2").value():
             # première activation : niveaux au tiers et aux deux tiers de l'échelle affichée
-            lo, hi = self.graph.analog_plot.vb.viewRange()[1]
+            lo, hi = self.graph.analog_view(self._signal()).viewRange()[1]
             self.set_horizontal(lo + (hi - lo) / 3, lo + 2 * (hi - lo) / 3)
 
     # ------------------------------------------------------------------ mesures

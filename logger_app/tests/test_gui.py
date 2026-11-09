@@ -1497,3 +1497,157 @@ def test_export_pattern_scope_record(setup, tmp_path):
     wait(qapp, lambda: False, 0.1)
     np.testing.assert_array_equal(pc.pattern.t, before)
     pc.stop()
+
+
+# ------------------------------------------------------------------ axes, recalage
+
+def _two_scopes(qapp, ctrl, tmp_path, monkeypatch, offset=4.5e-6):
+    """Tektronix (tension, courant) + PicoScope déclenché en retard de `offset`."""
+    from pico_files import pico_h5
+    n, dt = 20_000, 1e-8
+    t = -50e-6 + np.arange(n) * dt
+    edge = 1 / (1 + np.exp(-t / 0.2e-6))
+    path = tmp_path / "tek.csv"
+    meta = [('"Record Length"', f"{n}", '"Points"'), ('"Sample Interval"', f"{dt:.8e}", "s")]
+    with open(path, "w") as f:
+        for i in range(n):
+            m = meta[i] if i < len(meta) else ("", "", "")
+            f.write(f"{m[0]},{m[1]},{m[2]},{t[i]:.8e},{600 * edge[i]:.8e},"
+                    f"{35 * edge[i] * np.exp(-max(t[i], 0) / 60e-6):.8e}\n")
+    _open_scope(qapp, ctrl, [str(path)])
+    tp = -50e-6 + np.arange(10_000) * 2e-8
+    gate = 15 / (1 + np.exp(-(tp + 1e-6) / 0.1e-6))        # même front, vu 4,5 µs trop tôt
+    pico = pico_h5(tmp_path / "pico.h5", {"A": [(gate, tp[0] - offset, 2e-8)],
+                                          "B": [(0.2 * np.sin(2e5 * tp), tp[0] - offset, 2e-8)]})
+    monkeypatch.setattr(ctrl, "_ask_add_or_replace", lambda paths: "add")
+    scope = ctrl.scope_ctrl
+    assert ctrl.open_files([pico])
+    assert scope.wait_import()
+    assert wait(qapp, lambda: scope.active and len(scope.record.names) == 4)
+    wait(qapp, lambda: False, 0.3)
+    return scope
+
+
+def _edge_time(curve, level):
+    x, y = curve.getData()
+    return float(x[np.argmax(y > level)])
+
+
+def test_scope_y_axes(setup, tmp_path, monkeypatch):
+    """Un axe d'ordonnées par voie (enregistrement d'oscilloscope), modes, curseurs."""
+    from controller import y_axes
+    qapp, sim, window, ctrl = setup
+    graph = ctrl.graph_ctrl
+    assert len(graph.groups) == 1 and not graph.scales          # logger : axe unique
+    scope = _two_scopes(qapp, ctrl, tmp_path, monkeypatch)
+    assert graph.groups == [[0], [1], [2], [3]] and len(graph.scales) == 3
+    sides = [s.side for s in graph.scales]
+    assert sides == ["left", "right", "right"]
+    # chaque échelle cadrée sur sa voie : les courbes occupent toutes la hauteur
+    lo, hi = graph.analog_view(0).viewRange()[1]
+    assert lo < 0 < 600 < hi < 700
+    lo, hi = graph.analog_view(3).viewRange()[1]
+    assert -0.3 < lo < -0.2 and 0.2 < hi < 0.3
+    assert graph.analog_view(1) is graph.scales[0].vb
+    # vue d'ensemble et graphique logique alignés sur la zone de tracé
+    left = scope.overview_plot.layout.getContentsMargins()[0]
+    assert left == 1 + y_axes.AXIS_WIDTH
+    window.grab().save(str(SHOTS / "logger_axes.png"))
+    # zoom à la souris (zone de tracé) : toutes les échelles suivent
+    before = graph.analog_view(2).viewRange()[1]
+    graph.analog_plot.vb.sigRangeChangedManually.emit([False, True])
+    graph.analog_plot.vb.setYRange(0, 300, padding=0)
+    wait(qapp, lambda: False, 0.1)
+    after = graph.analog_view(2).viewRange()[1]
+    assert after[1] - after[0] < (before[1] - before[0]) * 0.6
+    # curseur horizontal sur une voie d'un axe secondaire : valeur dans son échelle
+    assert graph.to_main(2, graph.from_main(2, 123.0)) == pytest.approx(123.0)
+    lo2, hi2 = after
+    assert graph.from_main(2, 0.0) == pytest.approx(lo2, abs=1e-6 * (hi2 - lo2) + 1e-9)
+    # modes
+    window.axisModeActions["unit"].trigger()
+    assert graph.groups == [[0, 1], [2, 3]]                     # sans unité, V
+    window.axisModeActions["single"].trigger()
+    assert graph.groups == [[0, 1, 2, 3]] and not graph.scales
+    assert scope.overview_plot.layout.getContentsMargins()[0] == 1
+    window.axisModeActions["auto"].trigger()
+    assert len(graph.scales) == 3
+    window.actionAutoRange.setChecked(False)
+    window.actionAutoRange.setChecked(True)
+    wait(qapp, lambda: False, 0.1)
+    assert graph.analog_view(2).viewRange()[1][1] == pytest.approx(before[1], rel=0.05)
+    scope.close()
+    assert len(graph.groups) == 1 and not graph.scales
+
+
+def test_scope_time_alignment(setup, tmp_path, monkeypatch):
+    """Recalage des voies du PicoScope sur celles du Tektronix."""
+    qapp, sim, window, ctrl = setup
+    graph, align = ctrl.graph_ctrl, ctrl.align_ctrl
+    assert not window.actionAlignScope.isEnabled()
+    scope = _two_scopes(qapp, ctrl, tmp_path, monkeypatch)
+    assert window.actionAlignScope.isEnabled()
+    record = scope.record
+    assert record.sources["A"] == "pico.h5" and align.default_names(record) == {"A", "B"}
+    graph.analog_plot.setXRange(-10e-6, 10e-6, padding=0)
+    assert wait(qapp, lambda: not graph.frame.meta["envelope"])
+    wait(qapp, lambda: False, 0.2)
+    late = _edge_time(graph.curves[("A", 2)], 7.5)
+    assert late == pytest.approx(-5.5e-6, abs=0.1e-6)
+    # dialogue de choix (remplacé) puis recalage interactif
+    monkeypatch.setattr(align, "choose", lambda rec: (["A", "B"], "shift"))
+    window.actionAlignScope.trigger()
+    assert align.active and align.panel.isVisible()
+    assert graph.curves[("A", 0)].opacity() < 0.5 and graph.curves[("A", 2)].opacity() == 1
+    align.handle.setValue(align.handle.value() + 2e-6)           # poignée
+    assert align.delta == pytest.approx(2e-6)
+    wait(qapp, lambda: False, 0.15)
+    assert _edge_time(graph.curves[("A", 2)], 7.5) == pytest.approx(late + 2e-6, abs=0.05e-6)
+    align.panel.step_buttons[10].click()                         # +10 échantillons de 20 ns
+    assert align.delta == pytest.approx(2.2e-6)
+    wait(qapp, lambda: False, 0.15)
+    align.point_a.setValue(_edge_time(graph.curves[("A", 2)], 7.5))   # A : front de grille
+    align.point_b.setValue(-1e-6)                                # B : sa place sur la référence
+    window.grab().save(str(SHOTS / "logger_recalage.png"))
+    align.panel.align_button.click()
+    assert align.delta == pytest.approx(4.5e-6, abs=0.05e-6)
+    assert align.point_a.value() == pytest.approx(-1e-6, abs=1e-9)
+    view = graph.analog_plot.vb.viewRange()[0]
+    align.panel.validate_button.click()
+    assert not align.active and align.panel is None
+    assert wait(qapp, lambda: scope.active and graph.frame is not None)
+    wait(qapp, lambda: False, 0.3)
+    assert scope.record.shifts["A"] == pytest.approx(4.5e-6, abs=0.05e-6)
+    assert scope.record.shifts["B"] == scope.record.shifts["A"]
+    assert scope.record.shifts["CH1"] == 0.0
+    assert graph.analog_plot.vb.viewRange()[0] == pytest.approx(view, abs=1e-7)   # même vue
+    assert not graph.x_shift and graph.curves[("A", 0)].opacity() == 1
+    assert _edge_time(graph.curves[("A", 2)], 7.5) == pytest.approx(-1e-6, abs=0.05e-6)
+    assert "recalées de +4.5" in window.statusBar().currentMessage()
+    assert "décalage +4.5" in ctrl.tree_ctrl.items[("A", 2)][0].toolTip()
+    # annulation : rien n'est écrit ; fermeture de l'enregistrement : recalage abandonné
+    align.start(["A"])
+    align.set_delta(1e-6)
+    align.cancel()
+    assert not align.active and scope.record.shifts["A"] == pytest.approx(4.5e-6, abs=0.05e-6)
+    # remise à zéro
+    monkeypatch.setattr(align, "choose", lambda rec: (["A", "B"], "reset"))
+    window.actionAlignScope.trigger()
+    assert wait(qapp, lambda: scope.active and graph.frame is not None)
+    assert scope.record.shifts == {"CH1": 0.0, "CH2": 0.0, "A": 0.0, "B": 0.0}
+    align.start(["B"])
+    scope.close()
+    assert not align.active and not window.actionAlignScope.isEnabled()
+
+
+def test_align_channels_dialog(setup):
+    from view.align_panel import AlignChannelsDialog, signed
+    assert signed(4.5e-6) == "+4.5 µs" and signed(-1.2e-7).startswith("-120") and signed(0) == "0 s"
+    dialog = AlignChannelsDialog(["CH1", "A"], {"A": "pico.h5"}, {"A": 2e-6}, {"A"})
+    assert dialog.names() == ["A"] and dialog.reset_button.isEnabled()
+    assert "pico.h5" in dialog.list.item(1).text() and "+2 µs" in dialog.list.item(1).text()
+    dialog.list.item(1).setCheckState(QtCore.Qt.CheckState.Unchecked)
+    assert not dialog.shift_button.isEnabled() and not dialog.reset_button.isEnabled()
+    dialog.list.item(0).setCheckState(QtCore.Qt.CheckState.Checked)
+    dialog.shift_button.click()
+    assert dialog.action == "shift" and dialog.names() == ["CH1"]

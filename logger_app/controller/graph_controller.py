@@ -7,6 +7,9 @@ Deux panneaux à axe des temps commun (comme les panneaux du GLviewer) :
     - voies logiques, une voie par niveau (k + 0,8 x bit, comme `stairs(log)` de logger.m),
       affiché seulement si la voie logique est enregistrée.
 
+Les voies analogiques peuvent avoir plusieurs axes d'ordonnées (controller/y_axes.py) :
+un par voie pour un enregistrement d'oscilloscope, un seul pour le logger par défaut.
+
 Débit : le FPGA peut produire bien plus de trames que l'écran n'en affiche. Les trames
 reçues ne font que remplacer la « dernière trame » ; un QTimer redessine au plus
 REFRESH_HZ fois par seconde. Les courbes sont créées une fois par configuration et mises à
@@ -22,6 +25,7 @@ from PyQt6 import QtCore
 
 from model.config import LoggerConfig, TriggerType
 from model.protocol import Frame
+from controller import y_axes
 from ressources import pens, zoom
 
 
@@ -33,6 +37,9 @@ class LiveGraphController(QtCore.QObject):
     # panneau utile ou non pour la configuration : "analog" / "logic" / "math", bool
     availability_changed = QtCore.pyqtSignal(str, bool)
     math_errors = QtCore.pyqtSignal(dict)      # voies calculées en erreur sur la trame
+    # axes d'ordonnées recréés : largeur (px) des axes ajoutés à gauche, à droite
+    axes_changed = QtCore.pyqtSignal(int, int)
+    y_scales_changed = QtCore.pyqtSignal()     # plage d'un axe d'ordonnées modifiée
 
     REFRESH_HZ = 30
     LOGIC_HEIGHT = 0.8
@@ -55,10 +62,24 @@ class LiveGraphController(QtCore.QObject):
         self.auto_range = True
         self.curves: dict[tuple, pg.PlotDataItem] = {}
         self.hidden: set[tuple] = set()
+        # axes d'ordonnées des voies analogiques (controller/y_axes.py)
+        self.axis_mode = "auto"
+        self.groups: list[list[int]] = []          # voies de chaque axe
+        self.scales: list[y_axes.AxisScale] = []   # axes au-delà du premier
+        self._group_of: dict[int, int] = {}
+        self._bounds: dict[int, tuple] = {}        # étendue des courbes visibles par axe
+        self._threshold_group: int | None = None   # axe de la ligne du seuil
+        # décalage en X de courbes (aperçu d'un recalage, controller/align_controller.py)
+        self.x_shift: dict[tuple, float] = {}
         self._drawn = 0
         self._fps_t0 = time.perf_counter()
 
-        self.analog_plot = pg.PlotItem()
+        self.left_axis = y_axes.MainAxis("left")
+        self.analog_plot = pg.PlotItem(axisItems={"left": self.left_axis})
+        y_axes.reserve_columns(self.analog_plot)
+        self.analog_plot.vb.sigYRangeChanged.connect(self._on_main_y_changed)
+        self.analog_plot.vb.sigRangeChangedManually.connect(self._on_main_manual)
+        self.analog_plot.autoBtn.clicked.connect(self._on_auto_button)
         self.logic_plot = pg.PlotItem()
         self.math_plot = pg.PlotItem()          # voies calculées, axe des temps commun
         for plot in (self.analog_plot, self.logic_plot, self.math_plot):
@@ -96,6 +117,8 @@ class LiveGraphController(QtCore.QObject):
         """(Re)crée les courbes pour la configuration `cfg`."""
         self.cfg = cfg
         self.frame = None
+        self.x_shift = {}
+        self._clear_analog()
         for key, curve in self.curves.items():
             self._plot_of(key).removeItem(curve)
         self.curves.clear()
@@ -105,17 +128,7 @@ class LiveGraphController(QtCore.QObject):
         self.availability_changed.emit("logic", cfg.has_logic)
         self.logic_plot.setXLink(self.analog_plot if cfg.analog_signals else None)
 
-        if cfg.analog_signals:
-            for sig in cfg.analog_signals:
-                curve = self.analog_plot.plot(pen=pens.pen(pens.analog_color(sig)),
-                                              name=cfg.analog_name(sig))
-                curve.setVisible(("A", sig) not in self.hidden)
-                self.curves[("A", sig)] = curve
-            unit = {cfg.unit(s) for s in cfg.analog_signals}
-            self.analog_plot.setLabel("left", "Mesures", units=unit.pop() if len(unit) == 1 else None)
-            max_gain = max(abs(cfg.gain(s)) for s in cfg.analog_signals) or 1.0
-            # échelle fixe de logger.m : multiple de 100 supérieur au gain maximal
-            self._fixed_y = (np.floor(max_gain / 100) + 1) * 100 if max_gain >= 100 else max_gain
+        self._build_analog(cfg)
         if cfg.has_logic:
             for bit in range(16):
                 curve = self.logic_plot.plot(pen=pens.pen(pens.logic_color(bit)))
@@ -132,15 +145,6 @@ class LiveGraphController(QtCore.QObject):
                              min_range=10 / cfg.sample_rate, margin=0.05)
                 self.logic_plot.setXRange(t0, t0 + span, padding=0)
 
-        if self.threshold_line in self.analog_plot.items:
-            self.analog_plot.removeItem(self.threshold_line)
-        if cfg.trigger_type in (TriggerType.ABOVE, TriggerType.BELOW) and cfg.analog_signals:
-            self.threshold_line.setValue(cfg.threshold_physical())
-            self.threshold_line.label.setFormat(
-                f"seuil {cfg.analog_name(cfg.threshold_signal)} {cfg.trigger_type.label} "
-                f"{cfg.threshold_physical():.4g}")
-            self.analog_plot.addItem(self.threshold_line, ignoreBounds=True)
-
         span, t0 = cfg.frame_duration, cfg.time_origin
         # limites d'abord : sinon une trame plus longue que la précédente reste rognée
         # à l'ancienne durée
@@ -155,6 +159,151 @@ class LiveGraphController(QtCore.QObject):
 
     def _plot_of(self, key) -> pg.PlotItem:
         return {"A": self.analog_plot, "L": self.logic_plot, "M": self.math_plot}[key[0]]
+
+    # ------------------------------------------------------------------ axes d'ordonnées
+    def _clear_analog(self):
+        """Retire les courbes analogiques, la ligne du seuil et les axes ajoutés."""
+        if self._threshold_group is not None:
+            self._remove_from_view(self.threshold_line, self._threshold_group)
+            self._threshold_group = None
+        for key in [k for k in self.curves if k[0] == "A"]:
+            curve = self.curves.pop(key)
+            self._remove_from_view(curve, self._group_of.get(key[1], 0))
+            self.legend.removeItem(curve)
+        for scale in self.scales:
+            scale.remove()
+        self.scales, self.groups, self._group_of, self._bounds = [], [], {}, {}
+
+    def _remove_from_view(self, item, group: int):
+        if group == 0:
+            self.analog_plot.removeItem(item)
+        else:
+            self.scales[group - 1].vb.removeItem(item)
+
+    def _add_to_view(self, item, group: int, **kwargs):
+        if group == 0:
+            self.analog_plot.addItem(item, **kwargs)
+        else:
+            self.scales[group - 1].vb.addItem(item, **kwargs)
+
+    def _build_analog(self, cfg: LoggerConfig):
+        """Axes (controller/y_axes.py), courbes des voies analogiques, ligne du seuil."""
+        signals = cfg.analog_signals
+        mode = self.axis_mode
+        if mode == "auto":      # enregistrement d'oscilloscope : calibres différents
+            mode = "channel" if cfg.record_points else "single"
+        self.groups = y_axes.groups(signals, cfg.unit, mode)
+        self._group_of = {s: g for g, group in enumerate(self.groups) for s in group}
+        places = y_axes.columns(len(self.groups))
+        self.scales = [y_axes.AxisScale(self.analog_plot, side, column)
+                       for side, column in places[1:]]
+        for scale in self.scales:
+            scale.vb.sigYRangeChanged.connect(self.y_scales_changed)
+        multiple = len(self.groups) > 1
+        for g, group in enumerate(self.groups):
+            axis = self.left_axis if g == 0 else self.scales[g - 1].axis
+            units = {cfg.unit(s) for s in group}
+            unit = units.pop() if len(units) == 1 else None
+            if multiple and len(group) == 1:
+                y_axes.style_axis(axis, cfg.analog_name(group[0]), unit,
+                                  pens.analog_color(group[0]))
+            else:
+                y_axes.style_axis(axis, "Mesures" if not multiple else (unit or "Mesures"),
+                                  unit)
+        for sig in signals:
+            name = cfg.analog_name(sig)
+            curve = pg.PlotDataItem(pen=pens.pen(pens.analog_color(sig)), name=name)
+            group = self._group_of[sig]
+            self._add_to_view(curve, group)
+            if group:           # hors du PlotItem : réglages et légende à la main
+                curve.setDownsampling(auto=True, method="peak")
+                curve.setClipToView(True)
+                self.legend.addItem(curve, name)
+            curve.setVisible(("A", sig) not in self.hidden)
+            self.curves[("A", sig)] = curve
+        if signals:
+            max_gain = max(abs(cfg.gain(s)) for s in signals) or 1.0
+            # échelle fixe de logger.m : multiple de 100 supérieur au gain maximal
+            self._fixed_y = (np.floor(max_gain / 100) + 1) * 100 if max_gain >= 100 else max_gain
+        if cfg.trigger_type in (TriggerType.ABOVE, TriggerType.BELOW) and signals:
+            self.threshold_line.setValue(cfg.threshold_physical())
+            self.threshold_line.label.setFormat(
+                f"seuil {cfg.analog_name(cfg.threshold_signal)} {cfg.trigger_type.label} "
+                f"{cfg.threshold_physical():.4g}")
+            self._threshold_group = self._group_of.get(cfg.threshold_signal, 0)
+            self._add_to_view(self.threshold_line, self._threshold_group, ignoreBounds=True)
+        # échelles des temps des autres graphiques alignées : même place de part et d'autre
+        left = sum(1 for side, _ in places[1:] if side == "left") * y_axes.AXIS_WIDTH
+        right = sum(1 for side, _ in places[1:] if side == "right") * y_axes.AXIS_WIDTH
+        for plot in (self.logic_plot, self.math_plot):
+            plot.layout.setContentsMargins(1 + left, 1, 1 + right, 1)
+        self.axes_changed.emit(left, right)
+
+    def set_axis_mode(self, mode: str):
+        """Répartition des voies analogiques par axe : clé de y_axes.MODES."""
+        if mode not in y_axes.MODES or mode == self.axis_mode:
+            return
+        self.axis_mode = mode
+        if self.cfg is None:
+            return
+        self._clear_analog()
+        self._build_analog(self.cfg)
+        self._update_y_limits()
+        self._apply_y_range()
+        self._dirty = self.frame is not None
+
+    def analog_view(self, sig: int | None) -> pg.ViewBox:
+        """ViewBox (échelle verticale) de la voie analogique `sig`."""
+        group = self._group_of.get(sig, 0)
+        return self.analog_plot.vb if group == 0 else self.scales[group - 1].vb
+
+    def _on_main_y_changed(self, *_):
+        """
+        Plage de l'axe principal modifiée : les autres échelles la suivent (zoom ou
+        déplacement du graphique), sauf échelle automatique ou action sur l'axe seul.
+        """
+        follow = (not self.analog_plot.vb.autoRangeEnabled()[1]
+                  and not self.left_axis.direct)
+        for scale in self.scales:
+            if follow:
+                scale.follow()
+            else:
+                scale.store_relation()
+        self.y_scales_changed.emit()
+
+    def to_main(self, sig: int | None, y: float) -> float:
+        """Ordonnée de l'axe principal affichée à la hauteur de `y` sur l'axe de `sig`."""
+        view = self.analog_view(sig)
+        if view is self.analog_plot.vb:
+            return y
+        (m0, m1), (s0, s1) = self.analog_plot.vb.viewRange()[1], view.viewRange()[1]
+        return m0 + (y - s0) * (m1 - m0) / (s1 - s0) if s1 != s0 else y
+
+    def from_main(self, sig: int | None, y: float) -> float:
+        """Réciproque de to_main : valeur sur l'axe de `sig` d'une ordonnée principale."""
+        view = self.analog_view(sig)
+        if view is self.analog_plot.vb:
+            return y
+        (m0, m1), (s0, s1) = self.analog_plot.vb.viewRange()[1], view.viewRange()[1]
+        return s0 + (y - m0) * (s1 - s0) / (m1 - m0) if m1 != m0 else y
+
+    def _on_main_manual(self, *_):
+        """Zoom / déplacement du graphique : échelles figées, elles suivent la principale."""
+        if not self.left_axis.direct and not self.analog_plot.vb.autoRangeEnabled()[1]:
+            for scale in self.scales:
+                scale.auto = False
+
+    def _on_auto_button(self):
+        """Bouton « A » du graphique : tous les axes de nouveau ajustés à leurs courbes."""
+        if self.auto_range:
+            for scale in self.scales:
+                scale.auto = True
+            self._fit_scales()
+
+    def _fit_scales(self):
+        for g, scale in enumerate(self.scales, start=1):
+            if scale.auto or not scale.fitted:
+                scale.fit(self._bounds.get(g))
 
     # ------------------------------------------------------------------ voies calculées
     def set_math_engine(self, engine):
@@ -187,6 +336,8 @@ class LiveGraphController(QtCore.QObject):
 
     def set_auto_range(self, enabled: bool):
         self.auto_range = enabled
+        for scale in self.scales:
+            scale.auto, scale.fitted = enabled, False
         self._update_y_limits()
         self._apply_y_range()
 
@@ -198,20 +349,24 @@ class LiveGraphController(QtCore.QObject):
         cfg, frame = self.cfg, self.frame
         if cfg is None:
             return
-        if cfg.analog_signals:
+        # plusieurs axes : large marge, pour réduire une échelle et séparer les courbes
+        margin = zoom.ZOOM_OUT_MARGIN if len(self.groups) <= 1 else 5.0
+        self._bounds = {}
+        for g, group in enumerate(self.groups):
             arrays = []
             if frame is not None:
                 cols = [j for j, s in enumerate(frame.analog_signals)
-                        if ("A", s) not in self.hidden]
+                        if s in group and ("A", s) not in self.hidden]
                 if cols:
                     arrays.append(frame.analog[:, cols])
-            if self.threshold_line in self.analog_plot.items:
+            if self._threshold_group == g:
                 arrays.append([self.threshold_line.value()])
-            if not self.auto_range or not arrays:          # échelle fixe de logger.m
+            if g == 0 and (not self.auto_range or not arrays):   # échelle fixe de logger.m
                 arrays.append([-self._fixed_y, self._fixed_y])
             span = zoom.bounds(*arrays)
             if span is not None:
-                zoom.limit_y(self.analog_plot.vb, *span)
+                self._bounds[g] = span
+                zoom.limit_y(self.analog_view(group[0]), *span, margin=margin)
         results = math_results if math_results is not None else (
             self.math_results() if frame is not None else {})
         visible = [y for name, y in results.items() if ("M", name) not in self.hidden]
@@ -226,12 +381,25 @@ class LiveGraphController(QtCore.QObject):
         else:
             self.analog_plot.disableAutoRange(axis="y")
             self.analog_plot.setYRange(-self._fixed_y, self._fixed_y)
+        self._fit_scales()
 
     def set_visible(self, key, visible: bool):
         (self.hidden.discard if visible else self.hidden.add)(key)
         if key in self.curves:
             self.curves[key].setVisible(visible)
         self._update_y_limits()
+        self._fit_scales()
+
+    def set_x_shift(self, shifts: dict):
+        """Courbes tracées décalées en X ({clé : écart en s}) : aperçu d'un recalage."""
+        self.x_shift = dict(shifts)
+        self._dirty = self.frame is not None
+
+    def set_faded(self, keys, opacity: float = 0.25):
+        """Courbes `keys` estompées, les autres opaques (ensemble vide : toutes opaques)."""
+        keys = set(keys)
+        for key, curve in self.curves.items():
+            curve.setOpacity(opacity if key in keys else 1.0)
 
     def set_paused(self, paused: bool):
         self.paused = paused
@@ -266,8 +434,10 @@ class LiveGraphController(QtCore.QObject):
         for j, sig in enumerate(frame.analog_signals):
             curve = self.curves.get(("A", sig))
             if curve is not None:
-                curve.setData(t, frame.analog[:, j], skipFiniteCheck=not gaps,
-                              connect="finite" if gaps else "all")
+                shift = self.x_shift.get(("A", sig))
+                curve.setData(t + shift if shift else t, frame.analog[:, j],
+                              skipFiniteCheck=not gaps, connect="finite" if gaps else "all")
+        self._fit_scales()
         if frame.logic is not None:
             for bit in range(16):
                 curve = self.curves.get(("L", bit))

@@ -34,8 +34,9 @@ from model.protocol import Frame
 from model.scope_record import (MAX_RAW_POINTS, ImportCancelled, ScopeError, ScopeRecord,
                                 append_to_workspace, default_h5_path, default_pico_h5_path,
                                 import_picoscope, import_tek_csv, is_picoscope_h5,
-                                is_tek_csv, read_pico_layout)
+                                is_tek_csv, read_pico_layout, set_time_shifts)
 from ressources import pens
+from view.align_panel import signed
 
 RELOAD_DELAY_MS = 60               # regroupe les changements de zoom rapprochés
 MAX_FFT_ZONE_POINTS = 4_000_000    # FFT sur zone : points bruts par voie au plus
@@ -118,6 +119,7 @@ class ScopeController(QtCore.QObject):
     # (fichiers récents, dernier répertoire)
     loaded = QtCore.pyqtSignal(str, list)
     closed = QtCore.pyqtSignal()
+    closing = QtCore.pyqtSignal()                 # enregistrement sur le point d'être fermé
     display_frame = QtCore.pyqtSignal(object)     # portion relue (Frame)
     message = QtCore.pyqtSignal(str)
 
@@ -156,6 +158,7 @@ class ScopeController(QtCore.QObject):
         self.reload_timer.setSingleShot(True)
         self.reload_timer.timeout.connect(self.reload)
         graph_ctrl.analog_plot.sigXRangeChanged.connect(self._on_view_changed)
+        graph_ctrl.axes_changed.connect(self._on_axes_changed)
 
     @property
     def active(self) -> bool:
@@ -258,6 +261,28 @@ class ScopeController(QtCore.QObject):
             target)[1], "Ajout des voies...")
         return True
 
+    # ------------------------------------------------------------------ recalage
+    def apply_time_shifts(self, shifts: dict) -> bool:
+        """
+        Décalage dans le temps de voies ({voie : décalage total en s}), écrit dans le
+        workspace ; l'enregistrement est rouvert sur la même portion.
+        """
+        if self.record is None or self.worker is not None:
+            return False
+        path = self.record.path
+        view = tuple(self.graph.analog_plot.vb.viewRange()[0])
+        self.close(emit=False)              # fichier libéré pendant l'écriture
+        done = True
+        try:
+            set_time_shifts(path, shifts)
+        except (ScopeError, OSError) as exc:
+            self._error(str(exc))
+            done = False
+        if not self._open_h5(path, view):
+            self.closed.emit()
+            return False
+        return done
+
     def _run(self, task, title: str):
         self.worker = ImportWorker(task)
         dialog = ProgressDialog(title, self.view)
@@ -334,6 +359,7 @@ class ScopeController(QtCore.QObject):
         self.view.overviewgraph.show()
         self.view.actionCloseScope.setEnabled(True)
         self.view.actionAddScopeChannels.setEnabled(True)
+        self.view.actionAlignScope.setEnabled(True)
         self.opened.emit(self.cfg)            # le contrôleur principal configure l'affichage
         if not record.uniform:
             self.message.emit("Voies de bases de temps différentes : affichage sur la grille "
@@ -363,7 +389,10 @@ class ScopeController(QtCore.QObject):
         cfg.channel_tips = [f"{measures.si(1 / tb.dt, 'Hz', 4)}, "
                             f"{tb.n:,} points".replace(",", " ")
                             + f", début {measures.si(tb.t0, 's', 6)}"
-                            for tb in (record.timebases[name] for name in record.names)]
+                            + (f", décalage {signed(record.shifts[name])}"
+                               if record.shifts.get(name) else "")
+                            for name, tb in ((name, record.timebases[name])
+                                             for name in record.names)]
         cfg.sample_rate_hz = record.sample_rate
         cfg.record_points = record.length
         cfg.time_origin = record.t0
@@ -387,6 +416,10 @@ class ScopeController(QtCore.QObject):
         self.region.setBounds((t0, t1))
         self.region.setRegion((t0, t1))
         self._syncing = False
+
+    def _on_axes_changed(self, left: int, right: int):
+        """Vue d'ensemble alignée sur le graphique : place des axes d'ordonnées ajoutés."""
+        self.overview_plot.layout.setContentsMargins(1 + left, 1, 1 + right, 1)
 
     def _on_region_changed(self):
         if self._syncing or self.record is None:
@@ -479,6 +512,7 @@ class ScopeController(QtCore.QObject):
     def close(self, emit: bool = True):
         if self.record is None:
             return
+        self.closing.emit()
         self.reload_timer.stop()
         self.record.close()
         self.record = None
@@ -486,6 +520,7 @@ class ScopeController(QtCore.QObject):
         self.view.overviewgraph.hide()
         self.view.actionCloseScope.setEnabled(False)
         self.view.actionAddScopeChannels.setEnabled(False)
+        self.view.actionAlignScope.setEnabled(False)
         if emit:
             self.closed.emit()
 
