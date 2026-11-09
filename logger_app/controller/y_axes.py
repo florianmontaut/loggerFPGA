@@ -10,17 +10,21 @@ une AxisScale : une ViewBox sous la principale, de même géométrie et d'axe X 
 axe dans une colonne ajoutée à la mise en page du PlotItem.
 
 Échelles :
-    - automatique : chaque axe est ajusté à ses propres courbes (plein écran, comme
-      l'échelle automatique de l'axe principal) ;
-    - zoom ou déplacement dans le graphique : les plages des axes suivent celle de l'axe
+    - automatique : chaque axe est ajusté à ses propres courbes (plein écran) ; pour le
+      logger à chaque trame, pour un enregistrement d'oscilloscope une seule fois (les
+      échelles ne bougent plus quand on navigue dans le temps) ;
+    - molette dans le graphique : zoom en X seulement (ressources/zoom.TimeViewBox) ;
+    - déplacement dans le graphique : les plages des axes suivent celle de l'axe
       principal par une relation affine (y = a * y_principal + b), toutes les courbes
       bougent ensemble ;
-    - glisser ou molette SUR un axe : seule l'échelle de cet axe change (séparer des
-      courbes superposées), les autres ne bougent pas.
+    - glisser ou molette SUR un axe : seule l'échelle de cet axe change (étaler ou
+      décaler une voie), les autres ne bougent pas.
 """
 from __future__ import annotations
 
 import pyqtgraph as pg
+
+from ressources import zoom
 
 MAX_AXES = 8
 AXIS_WIDTH = 58             # largeur d'un axe supplémentaire (px)
@@ -121,6 +125,17 @@ def style_axis(axis: pg.AxisItem, text: str, unit: str | None, color=None):
     axis.setLabel(text, units=unit or None)
 
 
+def fit_range(bounds: tuple[float, float]) -> tuple[float, float]:
+    """Plage ajustée à des données (bornes y0, y1), avec une petite marge."""
+    y0, y1 = bounds
+    width = y1 - y0
+    if width <= 0:
+        width = max(abs(y0), abs(y1)) * 0.1 or 1.0
+        y0, y1 = y0 - width / 2, y1 + width / 2
+    margin = FIT_MARGIN * width
+    return y0 - margin, y1 + margin
+
+
 class AxisScale:
     """Échelle d'un groupe de voies au-delà du premier : sa ViewBox et son axe."""
 
@@ -132,7 +147,7 @@ class AxisScale:
         self.a, self.b = 1.0, 0.0
         self.auto = True            # ajustée à ses courbes à chaque trame
         self.fitted = False
-        self.vb = pg.ViewBox(enableMenu=False)
+        self.vb = zoom.TimeViewBox(enableMenu=False)
         self.vb.setParentItem(plot)
         # sous la ViewBox principale : elle reçoit la souris (zoom, déplacement, menu)
         self.vb.setZValue(self.main_vb.zValue() - 1)
@@ -174,13 +189,7 @@ class AxisScale:
         """Plage ajustée aux données (bornes y0, y1)."""
         if bounds is None:
             return
-        y0, y1 = bounds
-        width = y1 - y0
-        if width <= 0:
-            width = max(abs(y0), abs(y1)) * 0.1 or 1.0
-            y0, y1 = y0 - width / 2, y1 + width / 2
-        margin = FIT_MARGIN * width
-        self.vb.setYRange(y0 - margin, y1 + margin, padding=0)
+        self.vb.setYRange(*fit_range(bounds), padding=0)
         self.fitted = True
         self.store_relation()
 

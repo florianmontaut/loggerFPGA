@@ -56,6 +56,32 @@ def limit_y(vb: pg.ViewBox, lo: float, hi: float, margin: float = ZOOM_OUT_MARGI
                  minYRange=width * MIN_Y_FRACTION)
 
 
+FREE_Y_FACTOR = 50.0            # limit_y_free : dézoom jusqu'à 50 fois l'étendue
+
+
+def limit_y_free(vb: pg.ViewBox, lo: float, hi: float, factor: float = FREE_Y_FACTOR):
+    """
+    Limite du graphique à plusieurs échelles : seul le dézoom est borné (`factor` fois
+    l'étendue des données). La position reste libre : à tout niveau de dézoom, la courbe
+    se place du haut au bas de l'écran (décalage d'une voie par rapport aux autres).
+    """
+    width = _span(lo, hi)
+    reach = factor * width
+    vb.setLimits(yMin=lo - reach, yMax=hi + reach, maxYRange=reach,
+                 minYRange=width * MIN_Y_FRACTION)
+
+
+class TimeViewBox(pg.ViewBox):
+    """
+    ViewBox d'un graphique temporel : la molette dans la zone de tracé ne zoome qu'en X.
+    L'échelle verticale se règle sur l'axe voulu (molette ou glissement sur ses
+    graduations, AxisItem.wheelEvent précise alors l'axe).
+    """
+
+    def wheelEvent(self, ev, axis=None):
+        super().wheelEvent(ev, axis=0 if axis is None else axis)
+
+
 # bornes « libres » de pyqtgraph (ViewBox.__init__) : ±1e307, et non None (refusé par
 # _effectiveLimits) ; les étendues min / max acceptent None
 NO_LIMIT = 1e307

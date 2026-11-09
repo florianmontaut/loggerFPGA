@@ -285,7 +285,8 @@ exceeded » dans le sous-échantillonnage, glyphes et QPainter inutilisables sou
 | Graphique | Dézoom maximal | Zoom maximal |
 |---|---|---|
 | Temps (voies analogiques, calculées, logiques) | trame ou enregistrement entier + 5 % | 10 échantillons |
-| Valeurs (voies analogiques, calculées) | valeurs des courbes visibles + 25 % de chaque côté | 10⁻⁶ de l'étendue des valeurs |
+| Valeurs (voies analogiques du logger sur un axe, voies calculées) | valeurs des courbes visibles + 25 % de chaque côté | 10⁻⁶ de l'étendue des valeurs |
+| Valeurs (plusieurs axes, enregistrement d'oscilloscope) | 50 fois l'étendue des voies de l'axe, position libre | 10⁻⁶ de l'étendue des valeurs |
 | Voies logiques | les 16 niveaux | — (axe vertical fixe) |
 | FFT, fréquences | 0 à fs/2 (en décades en échelle log) + 5 % | 4 raies (0,01 décade en log) |
 | FFT, amplitudes | valeurs affichées + 25 % | 10⁻⁶ de l'étendue |
@@ -293,6 +294,8 @@ exceeded » dans le sous-échantillonnage, glyphes et QPainter inutilisables sou
 * Les limites des valeurs suivent chaque trame affichée et les cases de l'arborescence
   (une voie masquée n'élargit pas le dézoom). Elles incluent aussi la ligne de seuil et,
   avec *Échelle auto* décochée, l'échelle fixe de `logger.m`.
+* Pour un enregistrement d'oscilloscope, l'étendue retenue est celle de toutes les
+  portions déjà affichées : les limites ne se resserrent pas quand on zoome en temps.
 * Le zoom maximal en valeurs est relatif à l'étendue, et non fixé à 0,01 comme dans le
   GLviewer, pour pouvoir zoomer sur des signaux d'oscilloscope en mV.
 * Les limites de temps sont posées sur chacun des trois panneaux temporels : pyqtgraph
@@ -491,12 +494,20 @@ PicoScope. *Affichage › Axes des ordonnées* :
   répartition se fait par unité ; s'il reste plus de 8 échelles, le surplus partage le
   dernier axe. Le choix est mémorisé d'une session à l'autre.
 * **Échelle auto** : chaque axe est cadré sur ses propres voies, qui occupent toutes la
-  hauteur du graphique.
-* **Zoom et déplacement dans la zone de tracé** : tous les axes suivent ensemble, les
-  courbes gardent leurs positions relatives (comme une loupe sur l'écran).
+  hauteur du graphique. Pour le logger, à chaque trame. Pour un enregistrement
+  d'oscilloscope, une seule fois, à l'ouverture : les échelles sont ensuite **tenues**
+  et ne bougent plus quand on zoome ou qu'on se déplace dans le temps.
+* **Molette dans la zone de tracé** : zoom en temps seulement, centré sur le pointeur
+  (graphiques des voies analogiques et des voies calculées). Aucune échelle verticale
+  ne change.
 * **Sur un axe** (glisser ou molette sur ses graduations) : seule cette échelle change,
-  pour étaler ou décaler une voie par rapport aux autres.
-* *Échelle auto* (ou le bouton « A » du graphique) recadre tous les axes.
+  pour étaler ou décaler une voie par rapport aux autres. Le dézoom est borné à 50 fois
+  l'étendue de la voie, mais la position reste libre : à tout niveau de dézoom, la voie
+  se place du haut au bas de l'écran.
+* **Glisser dans la zone de tracé** : déplacement en temps et en valeurs, tous les axes
+  suivent ensemble et les courbes gardent leurs positions relatives.
+* *Échelle auto* (ou le bouton « A » du graphique) recadre tous les axes sur la portion
+  affichée.
 * Les curseurs horizontaux et le seuil se lisent dans l'échelle de leur voie. La vue
   d'ensemble, le graphique logique et celui des voies calculées restent alignés en temps
   sur le graphique analogique.
