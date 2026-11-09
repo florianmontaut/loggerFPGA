@@ -102,6 +102,25 @@ class MainWindow(QtWidgets.QMainWindow):
             "(un CSV Tektronix par voie, ou un .h5) de la même acquisition",
             icon=sp.SP_FileDialogNewFolder)
         self.actionAddScopeChannels.setEnabled(False)
+        self.actionAlignScope = self._action(
+            "Recaler des voies dans le temps...",
+            "Décaler dans le temps les voies d'un appareil de l'enregistrement "
+            "d'oscilloscope (appareils déclenchés l'un par l'autre, mal synchronisés)")
+        self.actionAlignScope.setEnabled(False)
+        # répartition des voies analogiques par axe d'ordonnées (controller/y_axes.py)
+        self.axisModeGroup = QtGui.QActionGroup(self)
+        self.axisModeActions = {}
+        for mode, (text, tip) in {
+                "auto": ("Automatique", "Un axe par voie pour un enregistrement "
+                                        "d'oscilloscope, un seul axe pour le logger"),
+                "channel": ("Un axe par voie", "Une échelle par voie analogique (8 axes au "
+                                               "plus, répartis à gauche et à droite)"),
+                "unit": ("Un axe par unité", "Une échelle par unité (V, A...)"),
+                "single": ("Axe unique", "Toutes les voies sur la même échelle")}.items():
+            action = self._action(text, tip, checkable=True)
+            self.axisModeGroup.addAction(action)
+            self.axisModeActions[mode] = action
+        self.axisModeActions["auto"].setChecked(True)
         self.actionAutoRange = self._action("Échelle auto", "Adapter l'échelle à chaque trame",
                                             checkable=True, icon=sp.SP_BrowserReload)
         self.actionAutoRange.setChecked(True)
@@ -126,8 +145,8 @@ class MainWindow(QtWidgets.QMainWindow):
         menu.addAction(self.actionOpenRecording)
         # rempli par RecentFilesController (controller/recent_controller.py)
         self.menuRecent = menu.addMenu("Fichiers récents")
-        menu.addActions([self.actionAddScopeChannels, self.actionCloseScope,
-                         self.actionSaveBuffer])
+        menu.addActions([self.actionAddScopeChannels, self.actionAlignScope,
+                         self.actionCloseScope, self.actionSaveBuffer])
         menu.addSeparator()
         menu.addAction(self.actionQuit)
         menu = self.menuBar().addMenu("Acquisition")
@@ -136,6 +155,8 @@ class MainWindow(QtWidgets.QMainWindow):
         menu.addActions([self.actionRecord, self.actionOpenRecordDir])
         menu = self.menuBar().addMenu("Affichage")
         menu.addActions([self.actionPause, self.actionAutoRange])
+        self.menuAxes = menu.addMenu("Axes des ordonnées")
+        self.menuAxes.addActions(list(self.axisModeActions.values()))
         menu.addSeparator()
         menu.addActions([self.actionFFT, self.actionResetFFT])
         menu.addSeparator()

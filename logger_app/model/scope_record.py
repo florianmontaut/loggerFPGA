@@ -27,7 +27,9 @@ lisible par les deux outils :
     /signals/<nom>/overview/min, max            vue d'ensemble (~4096 colonnes)
     /signals/<nom>/pyramid/level_XX/min, max    pyramide min/max (attr samples_per_bin)
 
-    attrs de /signals/<nom> (ajoutés par le logger) : sample_interval, time_origin, unit
+    attrs de /signals/<nom> (ajoutés par le logger) : sample_interval, time_origin, unit,
+            time_shift (recalage de la voie dans le temps, en s : la voie est affichée à
+            time_origin + time_shift, les échantillons ne sont pas modifiés)
         base de temps propre à la voie ; à défaut, celle du fichier
 
 Bases de temps différentes (voies d'acquisitions différentes, ou PicoScope : début décalé
@@ -417,9 +419,45 @@ def _fill_timebases(h5):
             _set_timebase(group, dt, t0)
 
 
+def _time_shift(attrs) -> float:
+    """Recalage d'une voie dans le temps (attribut time_shift, 0 par défaut)."""
+    try:
+        shift = float(attrs.get("time_shift", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    return shift if np.isfinite(shift) else 0.0
+
+
+def set_time_shifts(h5_path: str, shifts: dict[str, float]):
+    """
+    Recale des voies dans le temps : {voie : décalage total en s} (0 : voie remise à sa
+    place). Seul l'attribut time_shift est écrit, les données ne sont pas touchées ; le
+    workspace ne doit pas être ouvert ailleurs.
+    """
+    _require_h5py()
+    try:
+        h5 = h5py.File(h5_path, "r+")
+    except OSError as exc:
+        raise ScopeError(f"Workspace non modifiable : {exc}") from None
+    with h5:
+        signals = h5.get("signals")
+        for name, shift in shifts.items():
+            if signals is None or name not in signals:
+                raise ScopeError(f"{name} : voie absente du workspace")
+            if not np.isfinite(shift):
+                raise ScopeError(f"{name} : décalage invalide")
+            if shift:
+                signals[name].attrs["time_shift"] = float(shift)
+            elif "time_shift" in signals[name].attrs:
+                del signals[name].attrs["time_shift"]
+        _fill_timebases(h5)
+        _mark_timebases(h5)
+
+
 def _mark_timebases(h5):
     """Attribut mixed_timebase : vrai si les voies n'ont pas toutes la même base de temps."""
-    bases = {(float(g.attrs["sample_interval"]), float(g.attrs["time_origin"]),
+    bases = {(float(g.attrs["sample_interval"]),
+              float(g.attrs["time_origin"]) + _time_shift(g.attrs),
               int(g["raw/value"].shape[0]))
              for g in h5["signals"].values()
              if "sample_interval" in g.attrs and "raw/value" in g}
@@ -839,6 +877,8 @@ class ScopeRecord:
         file_dt, file_t0 = _file_timebase(self.h5)
         self.timebases: dict[str, Timebase] = {}
         self.units: dict[str, str] = {}
+        self.shifts: dict[str, float] = {}      # recalage dans le temps (time_shift)
+        self.sources: dict[str, str] = {}       # fichier d'origine de la voie
         for name in self.names:
             a = self.h5[f"signals/{name}"].attrs
             dt = float(a.get("sample_interval", file_dt) or 0.0)
@@ -846,8 +886,11 @@ class ScopeRecord:
                 self.close()
                 raise ScopeError(f"{name} : intervalle d'échantillonnage (sample_interval) "
                                  f"absent")
-            self.timebases[name] = Timebase(float(a.get("time_origin", file_t0)), dt,
-                                            int(self.raw(name).shape[0]))
+            self.shifts[name] = _time_shift(a)
+            self.sources[name] = _text(a["source_file"]) if "source_file" in a else ""
+            self.timebases[name] = Timebase(
+                float(a.get("time_origin", file_t0)) + self.shifts[name], dt,
+                int(self.raw(name).shape[0]))
             self.units[name] = _text(a["unit"]) if "unit" in a else ""
         bases = list(self.timebases.values())
         ref = bases[0]

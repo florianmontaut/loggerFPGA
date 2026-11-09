@@ -21,6 +21,7 @@ import os
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from controller.acquisition_controller import AcquisitionController
+from controller.align_controller import AlignController
 from controller.buffer_controller import BufferController, layout_differs
 from controller.channel_tree_controller import ChannelTreeController
 from controller.config_controller import ConfigController
@@ -114,6 +115,7 @@ class MainController(QtCore.QObject):
             view.close_guard = self.buffer_ctrl.confirm_quit
         # enregistrements longs d'oscilloscope (CSV Tektronix, HDF5)
         self.scope_ctrl = ScopeController(view, self.graph_ctrl)
+        self.align_ctrl = AlignController(view, self.graph_ctrl, self.scope_ctrl)
         # FFT sur zone : zone posée sur les voies analogiques ; enregistrement
         # d'oscilloscope : données brutes de la zone lues dans le fichier
         self.fft_ctrl.set_zone_plot(self.graph_ctrl.analog_plot)
@@ -142,6 +144,15 @@ class MainController(QtCore.QObject):
         v.actionStop.triggered.connect(self.acq_ctrl.stop)
         v.actionPause.toggled.connect(self.graph_ctrl.set_paused)
         v.actionAutoRange.toggled.connect(self.graph_ctrl.set_auto_range)
+        # axes d'ordonnées : répartition mémorisée d'une session à l'autre
+        mode = str(self.settings.value("display/y_axes", "auto")) if self.settings else "auto"
+        if mode in v.axisModeActions:
+            v.axisModeActions[mode].setChecked(True)
+            self.graph_ctrl.set_axis_mode(mode)
+        for mode, action in v.axisModeActions.items():
+            action.triggered.connect(lambda _=False, m=mode: self._set_axis_mode(m))
+        v.actionAlignScope.triggered.connect(lambda: self.align_ctrl.start_dialog())
+        self.align_ctrl.message.connect(v.show_message)
         v.actionLoadConfig.triggered.connect(self.load_config_dialog)
         v.actionSaveConfig.triggered.connect(self.save_config_dialog)
         v.actionQuit.triggered.connect(v.close)
@@ -314,6 +325,11 @@ class MainController(QtCore.QObject):
         box.exec()
         clicked = box.clickedButton()
         return "add" if clicked is add else "replace" if clicked is replace else "cancel"
+
+    def _set_axis_mode(self, mode: str):
+        self.graph_ctrl.set_axis_mode(mode)
+        if self.settings is not None:
+            self.settings.setValue("display/y_axes", mode)
 
     # ------------------------------------------------------------------ oscilloscope
     def _on_scope_opened(self, cfg: LoggerConfig):

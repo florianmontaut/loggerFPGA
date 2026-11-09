@@ -94,6 +94,8 @@ logger_app/
 │   ├── graph_controller.py        graphique temps réel (analogique + logique, seuil, curseur)
 │   ├── fft_controller.py          spectre temps réel et réglages FFT
 │   ├── scope_controller.py        mode enregistrement long (vue d'ensemble, zoom, import)
+│   ├── y_axes.py                  axes d'ordonnées multiples (répartition des voies, échelles)
+│   ├── align_controller.py        recalage de voies dans le temps (poignée, lignes A / B)
 │   ├── recent_controller.py       fichiers récents, dernier répertoire visité
 │   ├── pattern_controller.py      export d'un motif (zone, points marqués, copie)
 │   ├── math_controller.py         groupe « Voies calculées » (formules, état)
@@ -104,6 +106,7 @@ logger_app/
 ├── view/main_window.py            fenêtre : barre d'outils, arbre, paramètres, graphiques, barre d'état
 ├── view/detached_window.py        fenêtre d'un graphique déporté
 ├── view/pattern_dialog.py         fenêtre « Exporter un motif »
+├── view/align_panel.py            recalage : choix des voies, barre de réglage
 ├── ressources/pens.py             couleurs des voies (palette tab20 du GLviewer)
 ├── ressources/zoom.py             limites de zoom des graphiques
 ├── tools/fpga_simulator.py        simulateur du FPGA (UDP local)
@@ -470,6 +473,63 @@ Dépendance : `h5py`.
 
 ![enregistrement d'oscilloscope](docs/capture_oscilloscope.png)
 
+### Axes d'ordonnées multiples
+
+Les voies d'un oscilloscope n'ont pas les mêmes échelles (600 V, 35 A, 15 V de commande de
+grille...) : sur un axe unique, les plus petites sont écrasées. Le graphique analogique
+porte donc jusqu'à **8 axes d'ordonnées**, 4 à gauche et 4 à droite, à la manière d'un
+PicoScope. *Affichage › Axes des ordonnées* :
+
+| Choix | Répartition |
+|---|---|
+| **Automatique** (par défaut) | un axe par voie pour un enregistrement d'oscilloscope, un axe unique pour le logger (voies en pu ou de même nature) |
+| **Un axe par voie** | chaque axe prend la couleur de sa voie et porte son nom et son unité |
+| **Un axe par unité** | les voies de même unité partagent une échelle (V, A...) |
+| **Axe unique** | comportement d'origine |
+
+* La première moitié des axes est à gauche, le reste à droite. Au-delà de 8 voies, la
+  répartition se fait par unité ; s'il reste plus de 8 échelles, le surplus partage le
+  dernier axe. Le choix est mémorisé d'une session à l'autre.
+* **Échelle auto** : chaque axe est cadré sur ses propres voies, qui occupent toutes la
+  hauteur du graphique.
+* **Zoom et déplacement dans la zone de tracé** : tous les axes suivent ensemble, les
+  courbes gardent leurs positions relatives (comme une loupe sur l'écran).
+* **Sur un axe** (glisser ou molette sur ses graduations) : seule cette échelle change,
+  pour étaler ou décaler une voie par rapport aux autres.
+* *Échelle auto* (ou le bouton « A » du graphique) recadre tous les axes.
+* Les curseurs horizontaux et le seuil se lisent dans l'échelle de leur voie. La vue
+  d'ensemble, le graphique logique et celui des voies calculées restent alignés en temps
+  sur le graphique analogique.
+
+![un axe d'ordonnées par voie](docs/capture_axes.png)
+
+### Recaler des voies dans le temps
+
+Deux appareils déclenchés l'un par l'autre (un PicoScope par son entrée auxiliaire reliée
+au Tektronix, par exemple) ne sont synchronisés qu'à quelques microsecondes près. Une
+fois leurs voies réunies dans un même workspace (*Ajouter des voies*), *Fichier › Recaler
+des voies dans le temps...* décale celles d'un appareil sur un événement commun, comme
+« Align in time » du GLviewer.
+
+1. **Choix des voies** à décaler ensemble. Celles du dernier fichier ajouté sont cochées ;
+   chaque ligne rappelle le fichier d'origine et le décalage déjà appliqué. Les autres
+   voies servent de référence et sont estompées pendant le réglage.
+2. **Réglage**, les courbes suivant l'écart en direct :
+   * glisser la **poignée ⇔** ;
+   * saisir l'écart dans la barre du bas, ou l'ajuster par pas de ±1 et ±10 échantillons ;
+   * placer la ligne **A** sur un événement des voies recalées et la ligne **B** sur le
+     même événement de la référence, puis **Aligner A sur B**.
+3. **Valider** (Entrée) ou **Annuler** (Échap).
+
+Les échantillons ne sont pas modifiés : seul un décalage par voie (attribut `time_shift`
+du signal) est écrit dans le workspace, en plus de l'origine des temps d'origine. Il se
+cumule d'un recalage à l'autre, s'affiche dans l'info-bulle de la voie et se retire par
+*Remettre à zéro* dans la fenêtre de choix. Mesures, FFT, voies calculées et export de
+motifs utilisent les temps recalés. Comme pour les bases de temps différentes,
+HDF5_viewer ne tient pas compte de ce décalage (`mixed_timebase` vaut alors vrai).
+
+![recalage des voies d'un PicoScope sur celles d'un Tektronix](docs/capture_recalage.png)
+
 ### Voies calculées (MATH)
 
 Comme les voies MATH d'un oscilloscope : des formules sur les voies de chaque trame,
@@ -670,7 +730,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-216 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, exports PicoScope et bases de temps différentes, acquisition complète contre le
+223 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, exports PicoScope et bases de temps différentes, axes d'ordonnées multiples, recalage dans le temps, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes
