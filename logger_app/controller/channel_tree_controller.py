@@ -28,6 +28,7 @@ class ChannelTreeController(QtCore.QObject):
 
     visibility_changed = QtCore.pyqtSignal(object, bool)   # clé, visible
     channel_selected = QtCore.pyqtSignal(object)            # clé
+    current_changed = QtCore.pyqtSignal(object)             # clé, None hors d'une voie
 
     COLUMNS = ["Voie", "Valeur", "Unité", "Δ t2−t1"]
     DELTA = 3
@@ -174,6 +175,7 @@ class ChannelTreeController(QtCore.QObject):
         self.visibility_changed.emit(key, visible)
 
     def _on_current_changed(self, current: QtCore.QModelIndex, _previous):
-        key = current.siblingAtColumn(0).data(KEY_ROLE)
+        key = current.siblingAtColumn(0).data(KEY_ROLE) if current.isValid() else None
+        self.current_changed.emit(key)
         if key is not None:
             self.channel_selected.emit(key)
