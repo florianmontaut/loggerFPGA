@@ -8,3 +8,7 @@ h5py>=3.8
 # https://github.com/florianmontaut/qtsocle, absent de PyPI, à installer avant ce fichier
 # (pip install git+https://github.com/florianmontaut/qtsocle@v0.1.0)
 qtsocle>=0.1,<0.2
+# moteur de formules des voies calculées, commun au GLviewer :
+# https://github.com/florianmontaut/formules, absent de PyPI, à installer avant ce fichier
+# (pip install git+https://github.com/florianmontaut/formules@v0.1.0)
+formules>=0.1,<0.2

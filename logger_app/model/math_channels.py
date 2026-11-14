@@ -1,7 +1,7 @@
 # model/math_channels.py
 """
 Voies calculées (« MATH » des oscilloscopes) : formules sur les voies de chaque trame,
-évaluées en temps réel avec le moteur de formules du GLviewer (model/formula).
+évaluées en temps réel avec le moteur de formules commun au GLviewer (paquet formules).
 
     P_INV1       = [V_PH1_INV1]*[I_PH1_INV1]
     I_moy        = movavg([I_HV]; 64)
@@ -33,13 +33,13 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
+import formules as formula
 import numpy as np
+from formules import FormulaError, units
+from formules.interpreter import Interpreter
+from formules.nodes import FuncNode
 
-from . import formula
 from .config import LoggerConfig
-from .formula import FormulaError, units
-from .formula.interpreter import Interpreter
-from .formula.nodes import FuncNode
 from .protocol import Frame
 
 TIME = "time"
