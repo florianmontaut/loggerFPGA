@@ -151,7 +151,7 @@ calcul de `logger.m` (`tests/test_protocol.py`), de même que le découpage des 
 ## 5. Utilisation
 
 ```bash
-pip install -e ../../qtsocle         # socle commun, cloné à côté du dépôt (absent de PyPI)
+pip install git+https://github.com/florianmontaut/qtsocle@v0.1.0   # socle commun (absent de PyPI)
 pip install -r requirements.txt
 python main.py                       # dernière configuration utilisée
 python main.py ../logger_FPGA/ressources/parametres_scope.json
@@ -159,8 +159,10 @@ python main.py ../logger_FPGA/ressources/parametres_scope.json
 
 Le démarrage, la fermeture ordonnée, le journal des erreurs et la construction de
 l'exécutable viennent de [qtsocle](https://github.com/florianmontaut/qtsocle), le socle
-commun aux applications PyQt6 (CoolingTool, RLCmeter, GLviewer). Sans copie locale :
-`pip install git+https://github.com/florianmontaut/qtsocle`.
+commun aux applications PyQt6 (CoolingTool, RLCmeter, GLviewer). Il s'installe depuis
+son étiquette de version, pour que le logger ne change pas quand le socle évolue. Pour
+travailler sur le socle en même temps, depuis une copie locale : `pip install -e
+../../qtsocle`.
 
 ### Exécutable
 

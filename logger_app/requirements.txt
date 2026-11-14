@@ -6,5 +6,5 @@ numpy>=1.26
 h5py>=3.8
 # socle commun des applications (démarrage, journal des erreurs, thème, exécutable) :
 # https://github.com/florianmontaut/qtsocle, absent de PyPI, à installer avant ce fichier
-# (pip install -e ..\..\qtsocle, ou pip install git+https://github.com/florianmontaut/qtsocle)
+# (pip install git+https://github.com/florianmontaut/qtsocle@v0.1.0)
 qtsocle>=0.1,<0.2
