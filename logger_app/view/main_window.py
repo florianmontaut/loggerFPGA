@@ -21,13 +21,10 @@ La vue ne contient aucune logique : les contrôleurs se connectent à ses widget
 """
 from __future__ import annotations
 
-import pathlib
-
 import pyqtgraph as pg
 import pyqtgraph.parametertree as ptree
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-PATH = pathlib.Path(__file__).parent
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -37,7 +34,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Logger FPGA")
-        self.setWindowIcon(QtGui.QIcon(str(PATH / "icon.ico")))
         self.resize(1400, 850)
         self._init_actions()
         self._init_menus()

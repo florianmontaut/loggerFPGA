@@ -1,3 +1,11 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# données locales de développement (journal des erreurs)
+donnees_locales/
+
+# PyInstaller
+build/
+dist/
+*.spec
