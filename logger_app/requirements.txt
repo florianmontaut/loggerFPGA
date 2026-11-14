@@ -4,5 +4,11 @@ pyqtgraph>=0.13.3
 numpy>=1.26
 # enregistrements longs d'oscilloscope (workspace HDF5, format du projet HDF5_viewer)
 h5py>=3.8
-# optionnel : même thème que le GLviewer
-pyqtdarktheme==2.1.0
+# socle commun des applications (démarrage, journal des erreurs, thème, exécutable) :
+# https://github.com/florianmontaut/qtsocle, absent de PyPI, à installer avant ce fichier
+# (pip install git+https://github.com/florianmontaut/qtsocle@v0.1.0)
+qtsocle>=0.1,<0.2
+# moteur de formules des voies calculées, commun au GLviewer :
+# https://github.com/florianmontaut/formules, absent de PyPI, à installer avant ce fichier
+# (pip install git+https://github.com/florianmontaut/formules@v0.1.0)
+formules>=0.1,<0.2

@@ -1759,6 +1759,7 @@ def test_highlight_selected_channel(setup, tmp_path, monkeypatch):
     # glisser dans la zone de tracé : déplacement, toutes les échelles suivent
     QTest.mousePress(view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=center)
     for step in (10, 25, 40):
+        QTest.qWait(25)          # pyqtgraph ignore les déplacements trop rapprochés
         QTest.mouseMove(view.viewport(), center + QtCore.QPoint(step, step))
         qapp.processEvents()
     QTest.mouseRelease(view.viewport(), QtCore.Qt.MouseButton.LeftButton,
@@ -1830,6 +1831,7 @@ def test_axis_zero_snaps_to_zone_limits(setup, tmp_path, monkeypatch):
     to_line = round((0.2 - start) * height)
     QTest.mousePress(view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=down)
     for dy in (5, 12, to_line - 6):                              # 6 px avant le repère
+        QTest.qWait(25)          # pyqtgraph ignore les déplacements trop rapprochés
         QTest.mouseMove(view.viewport(), down - QtCore.QPoint(0, dy))
         qapp.processEvents()
     assert vb.zero_fraction() == pytest.approx(0.2, abs=1e-9) and vb.zero_snapped()
@@ -1838,12 +1840,15 @@ def test_axis_zero_snaps_to_zone_limits(setup, tmp_path, monkeypatch):
     m0, m1 = graph.analog_plot.vb.viewRange()[1]
     assert [line.value() for line in graph.snap_guides] == pytest.approx(
         [m0 + f * (m1 - m0) for f in (0.2, 0.4, 0.6, 0.8)])
+    QTest.qWait(25)          # pyqtgraph ignore les déplacements trop rapprochés
     QTest.mouseMove(view.viewport(), down - QtCore.QPoint(0, to_line + 7))
     qapp.processEvents()                                         # 7 px après : encore collé
     assert vb.zero_fraction() == pytest.approx(0.2, abs=1e-9)
+    QTest.qWait(25)          # pyqtgraph ignore les déplacements trop rapprochés
     QTest.mouseMove(view.viewport(), down - QtCore.QPoint(0, to_line + 40))
     qapp.processEvents()                                         # plus loin : libre
     assert vb.zero_fraction() == pytest.approx(0.2 + 40 / height, abs=2 / height)
+    QTest.qWait(25)          # pyqtgraph ignore les déplacements trop rapprochés
     QTest.mouseMove(view.viewport(), down - QtCore.QPoint(0, to_line + 3))
     QTest.mouseRelease(view.viewport(), QtCore.Qt.MouseButton.LeftButton,
                        pos=down - QtCore.QPoint(0, to_line + 3))

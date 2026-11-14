@@ -73,13 +73,14 @@ configuration puis mises à jour par `setData`, avec le sous-échantillonnage «
 
 ```
 logger_app/
-├── main.py                        point d'entrée (python main.py [config.json])
+├── main.py                        point d'entrée (python main.py [config.json]), démarrage par qtsocle
+├── version.py                     numéro de version
+├── build_exe.bat                  construit dist\LoggerFPGA.exe (qtsocle.build, PyInstaller)
 ├── model/
 │   ├── config.py                  LoggerConfig : paramètres, validation, JSON (ancien format accepté)
 │   ├── protocol.py                trames UDP (construction / décodage), Frame
 │   ├── recorder.py                enregistrement : un fichier csv (colonne trame) + .json, ou npz
 │   ├── frame_buffer.py            mémoire tampon des dernières trames
-│   ├── formula/                   moteur de formules du GLviewer (copie, voir son __init__)
 │   ├── math_channels.py           voies calculées : fonctions temps réel, unités, évaluation
 │   ├── loader.py                  relecture d'un enregistrement (.csv, .npz)
 │   ├── pattern.py                 export d'un motif : sélection, décimation, formats
@@ -149,10 +150,41 @@ calcul de `logger.m` (`tests/test_protocol.py`), de même que le découpage des 
 ## 5. Utilisation
 
 ```bash
+pip install git+https://github.com/florianmontaut/qtsocle@v0.1.0    # socle commun (absent de PyPI)
+pip install git+https://github.com/florianmontaut/formules@v0.1.0   # moteur de formules (idem)
 pip install -r requirements.txt
 python main.py                       # dernière configuration utilisée
 python main.py ../logger_FPGA/ressources/parametres_scope.json
 ```
+
+Le démarrage, la fermeture ordonnée, le journal des erreurs et la construction de
+l'exécutable viennent de [qtsocle](https://github.com/florianmontaut/qtsocle), le socle
+commun aux applications PyQt6 (CoolingTool, RLCmeter, GLviewer). Il s'installe depuis
+son étiquette de version, pour que le logger ne change pas quand le socle évolue. Pour
+travailler sur le socle en même temps, depuis une copie locale : `pip install -e
+../../qtsocle`. Le moteur des voies calculées,
+[formules](https://github.com/florianmontaut/formules), s'installe de la même façon.
+
+### Exécutable
+
+```bat
+pip install -r requirements-dev.txt
+build_exe.bat
+```
+
+`dist\LoggerFPGA.exe` est un fichier unique, sans console, qui se lance sans Python.
+
+* **Erreurs inattendues** : signalées dans une boîte de dialogue et écrites dans
+  `erreurs.log`. Un exécutable sans console les perdrait sinon en silence.
+* **Emplacement du journal** : `%APPDATA%\LoggerFPGA\` pour l'exécutable,
+  `donnees_locales\` du projet depuis les sources (ignoré par git). La variable
+  d'environnement `QTSOCLE_DATA_DIR` impose un autre dossier.
+* **Réglages** : inchangés. La dernière configuration, les fichiers récents et le choix
+  des axes restent où ils étaient (dossier de configuration de l'utilisateur, registre).
+* **Thème** : celui de qtsocle, clair ou sombre selon Windows. Les graphiques restent
+  sur fond noir, pour lequel les couleurs des voies et des curseurs sont choisies.
+* `python -m pytest --exe` construit l'exécutable et vérifie qu'il démarre seul, hors du
+  dossier du projet (une à deux minutes).
 
 La configuration courante est enregistrée à la fermeture (dossier de configuration de
 l'utilisateur) et peut être exportée ou rechargée en JSON (menu *Fichier*). L'ancien
@@ -609,13 +641,13 @@ Pmoy       avg([P_INV1])                    réutilise une voie calculée défin
 * **Configuration** : les définitions sont enregistrées avec elle (JSON, dernière
   configuration utilisée).
 
-**Moteur** : celui du GLviewer (`model/formula`, lexer → parser → arbre → interpréteur
-numpy, analyse des unités), copié sans modification à l'exception de `errors.py`. Les
-ajouts propres au logger (fonctions qui ont besoin de la fréquence d'échantillonnage,
-unités lisibles comme V², V·A, V/s) sont dans `model/math_channels.py`, par sous-classes,
-pour pouvoir reprendre telles quelles les évolutions du GLviewer. Les tests du moteur du
-GLviewer sont repris dans `tests/glviewer_formula`. Coût mesuré : moins de 0,2 ms par
-formule et par trame de 16 384 points.
+**Moteur** : le paquet [formules](https://github.com/florianmontaut/formules) (lexer →
+parser → arbre → interpréteur numpy, analyse des unités), issu du GLviewer. Le logger en
+avait une copie dans `model/formula` ; il utilise maintenant le paquet, avec ses propres
+tests. Les ajouts propres au logger (fonctions qui ont besoin de la fréquence
+d'échantillonnage, unités lisibles comme V², V·A, V/s) restent dans
+`model/math_channels.py`, par sous-classes. Coût mesuré : moins de 0,2 ms par formule et
+par trame de 16 384 points.
 
 Limites actuelles : la FFT et les *Mesures* des curseurs portent sur les voies
 analogiques seulement, et les voies calculées ne sont pas écrites dans les fichiers
@@ -772,7 +804,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-226 tests (dont 92 repris du moteur de formules du GLviewer) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, exports PicoScope et bases de temps différentes, axes d'ordonnées multiples, recalage dans le temps, voie mise en évidence, alignement des zéros, acquisition complète contre le
+138 tests, plus celui de l'exécutable avec `--exe` (le moteur de formules a les siens, dans son paquet) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, exports PicoScope et bases de temps différentes, axes d'ordonnées multiples, recalage dans le temps, voie mise en évidence, alignement des zéros, démarrage par `main.py` et journal des erreurs, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes
