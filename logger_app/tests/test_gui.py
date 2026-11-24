@@ -1881,3 +1881,149 @@ def test_axis_zero_snaps_to_zone_limits(setup, tmp_path, monkeypatch):
     lo, hi = main.viewRange()[1]
     assert hi == pytest.approx(0.0, abs=1e-9 * (hi - lo)) and lo < -600    # zéro en haut
     scope.close()
+
+
+# ------------------------------------------------------------------ projet, balises
+
+def _scope_record(qapp, ctrl, folder, amplitude, monkeypatch, n=20_000):
+    """Enregistrement Tektronix de deux voies (un CSV par voie) : CH1 sinus, CH2 rampe."""
+    folder.mkdir()
+    k = np.arange(n)
+    ch1 = _tek_channel(folder / "tek0000CH1.csv", amplitude * np.sin(k / 400))
+    ch2 = _tek_channel(folder / "tek0000CH2.csv", 0.1 * amplitude * k / n)
+    monkeypatch.setattr(ctrl, "_ask_add_or_replace", lambda paths: "replace")
+    _open_scope(qapp, ctrl, [ch1, ch2])
+    return ctrl.scope_ctrl.record.path
+
+
+def test_project_layout_switch_and_bookmarks(setup, tmp_path, monkeypatch):
+    import json
+    qapp, sim, window, ctrl = setup
+    graph, project, scope, tree = ctrl.graph_ctrl, ctrl.project_ctrl, ctrl.scope_ctrl, \
+        ctrl.tree_ctrl
+    bar = window.projectBar
+    path_a = _scope_record(qapp, ctrl, tmp_path / "A", 600.0, monkeypatch)
+    assert bar.isVisible() and bar.records.count() == 1
+    assert window.actionAddBookmark.isEnabled()
+    # disposition choisie sur A : échelle de CH2, CH1 masquée, CH2 en évidence, zoom
+    graph.analog_view(1).setYRange(-10.0, 70.0, padding=0)
+    tree.items[("A", 0)][0].setCheckState(QtCore.Qt.CheckState.Unchecked)
+    tree.view.setCurrentIndex(tree.items[("A", 1)][0].index())
+    graph.analog_plot.setXRange(-2e-3, 4e-3, padding=0)
+    wait(qapp, lambda: False, 0.2)
+    layout = project.capture()
+    assert layout["channels"]["CH2"] == {"y": [-10.0, 70.0], "visible": True}
+    assert layout["channels"]["CH1"]["visible"] is False
+    assert layout["highlighted"] == "CH2"
+    tree.items[("A", 0)][0].setCheckState(QtCore.Qt.CheckState.Checked)
+    wait(qapp, lambda: False, 0.2)
+    # balise 1 : portion zoomée et échelles, vignette
+    bookmark = project.add_bookmark()
+    assert bookmark.name == "Balise 1" and bookmark.thumbnail
+    import base64
+    (SHOTS / "logger_balise_vignette.png").write_bytes(base64.b64decode(bookmark.thumbnail))
+    assert bookmark.x == pytest.approx([-2e-3, 4e-3]) and bookmark.y["CH2"] == [-10.0, 70.0]
+    assert bar.bookmark_button(0) is not None and bar.bookmark_button(0).text() == "1"
+    assert "×3,33" in bar.bookmark_button(0).toolTip().replace(".", ",")
+    # B ouvert par Fichier (projet sans titre) : échelle automatique, ajouté au projet
+    path_b = _scope_record(qapp, ctrl, tmp_path / "B", 5.0, monkeypatch)
+    assert project.project.records == [path_a, path_b] and bar.records.count() == 2
+    lo, hi = graph.analog_view(1).viewRange()[1]                # CH2 : 0 à 0,5
+    assert -0.1 < lo < 0 and 0.5 < hi < 0.6
+    # retour sur A par la barre : même vue que B (disposition et portion de temps)
+    graph.analog_view(1).setYRange(-1.0, 0.6, padding=0)
+    graph.analog_plot.setXRange(1e-3, 2e-3, padding=0)
+    wait(qapp, lambda: False, 0.2)
+    bar.records.activated.emit(bar.records.findData(path_a))
+    wait(qapp, lambda: scope.active and graph.frame is not None)
+    wait(qapp, lambda: False, 0.2)
+    assert scope.record.path == path_a and bar.records.currentData() == path_a
+    assert graph.analog_view(1).viewRange()[1] == pytest.approx([-1.0, 0.6])
+    assert graph.analog_plot.vb.viewRange()[0] == pytest.approx([1e-3, 2e-3])
+    # balise 1 (Ctrl+1) : portion et échelles de la balise
+    project._shortcuts[0].activated.emit()
+    wait(qapp, lambda: False, 0.2)
+    assert graph.analog_plot.vb.viewRange()[0] == pytest.approx([-2e-3, 4e-3])
+    assert graph.analog_view(1).viewRange()[1] == pytest.approx([-10.0, 70.0])
+    window.grab().save(str(SHOTS / "logger_projet.png"))
+    tree.items[("A", 0)][0].setCheckState(QtCore.Qt.CheckState.Unchecked)
+    # projet enregistré : chemins relatifs, disposition par nom de voie
+    target = tmp_path / "essais.lfproj"
+    monkeypatch.setattr(project, "ask_save_path", lambda default: str(target))
+    window.actionSaveProject.trigger()
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert [r["path"] for r in data["records"]] == [
+        os.path.relpath(path_a, tmp_path).replace(os.sep, "/"),
+        os.path.relpath(path_b, tmp_path).replace(os.sep, "/")]
+    assert data["current"] == 0 and len(data["bookmarks"]) == 1
+    assert data["channels"]["CH2"]["y"] == [-10.0, 70.0]
+    assert not project.is_modified() and "essais.lfproj" in bar.title.text()
+    graph.analog_view(1).setYRange(-50.0, 50.0, padding=0)
+    assert project.is_modified()
+    # rouvert après recalage (même enregistrement) : sa disposition est gardée
+    assert scope.apply_time_shifts({"CH1": 0.0})
+    wait(qapp, lambda: False, 0.2)
+    assert graph.analog_view(1).viewRange()[1] == pytest.approx([-50.0, 50.0])
+    # balise hors de l'enregistrement : refusée
+    project.project.bookmarks.append(project.project.bookmarks[0].__class__(
+        "Loin", [5.0, 6.0]))
+    assert not project.apply_bookmark(1)
+    del project.project.bookmarks[1]
+    # balise : renommer, remplacer par la vue, supprimer
+    monkeypatch.setattr(project, "ask_name", lambda current: "Commutation")
+    project._on_bookmark_menu(0, "rename")
+    assert bar.bookmark_button(0).text() == "1 · Commutation"
+    graph.analog_plot.setXRange(0.0, 1e-3, padding=0)
+    project._on_bookmark_menu(0, "update")
+    assert project.project.bookmarks[0].x == pytest.approx([0.0, 1e-3])
+    assert project.project.bookmarks[0].name == "Commutation"
+    # projet modifié : la question est posée avant d'en ouvrir un autre (ici : annuler)
+    monkeypatch.setattr(project, "ask_discard", lambda action: "cancel")
+    assert not ctrl.open_files([str(target)])
+    # projet rouvert depuis le fichier (modifications abandonnées) : A et sa disposition
+    monkeypatch.setattr(project, "ask_discard", lambda action: "discard")
+    scope.close()
+    assert not bar.isVisible()
+    assert ctrl.open_files([str(target)])
+    wait(qapp, lambda: scope.active and graph.frame is not None)
+    wait(qapp, lambda: False, 0.2)
+    assert scope.record.path == path_a and project.path == str(target)
+    assert graph.analog_view(1).viewRange()[1] == pytest.approx([-10.0, 70.0])
+    assert ("A", 0) in tree.hidden and graph.highlighted == ("A", 1)
+    # portion affichée à l'enregistrement du projet : celle de la balise 1
+    assert graph.analog_plot.vb.viewRange()[0] == pytest.approx([-2e-3, 4e-3])
+    assert [b.name for b in project.project.bookmarks] == ["Balise 1"]
+    assert not project.is_modified()
+    # projet enregistré : B ouvert par Fichier prend la disposition du projet
+    _scope_record_reopen = ctrl.open_files
+    monkeypatch.setattr(ctrl, "_ask_add_or_replace", lambda paths: "replace")
+    assert _scope_record_reopen([path_b])
+    wait(qapp, lambda: scope.active and graph.frame is not None)
+    assert graph.analog_view(1).viewRange()[1] == pytest.approx([-10.0, 70.0])
+    # supprimer la balise, retirer B de la liste, nouveau projet
+    project._on_bookmark_menu(0, "delete")
+    assert project.project.bookmarks == [] and bar.bookmark_button(0) is None
+    bar.remove_action.trigger()
+    assert project.project.records == [path_a]
+    window.actionNewProject.trigger()
+    assert project.path is None and project.project.records == [path_b]
+    tree.items[("A", 0)][0].setCheckState(QtCore.Qt.CheckState.Checked)
+    scope.close()
+
+
+def test_project_file_errors(setup, tmp_path, monkeypatch):
+    qapp, sim, window, ctrl = setup
+    shown = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                        lambda parent, title, text: shown.append(text))
+    bad = tmp_path / "mauvais.lfproj"
+    bad.write_text("{}", encoding="utf-8")
+    assert not ctrl.open_files([str(bad)])
+    assert "pas un projet" in shown[-1]
+    # projet dont l'enregistrement a disparu : ouvert, l'absence est signalée
+    gone = tmp_path / "parti.lfproj"
+    gone.write_text('{"format": "loggerfpga_project", "version": 1, '
+                    '"records": [{"path": "absent.h5"}], "current": 0}', encoding="utf-8")
+    assert ctrl.open_files([str(gone)])
+    assert "introuvable" in window.statusBar().currentMessage()
+    assert not ctrl.scope_ctrl.active

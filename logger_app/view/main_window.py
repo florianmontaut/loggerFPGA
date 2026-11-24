@@ -25,6 +25,8 @@ import pyqtgraph as pg
 import pyqtgraph.parametertree as ptree
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from view.project_bar import ProjectBar
+
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -103,6 +105,23 @@ class MainWindow(QtWidgets.QMainWindow):
             "Décaler dans le temps les voies d'un appareil de l'enregistrement "
             "d'oscilloscope (appareils déclenchés l'un par l'autre, mal synchronisés)")
         self.actionAlignScope.setEnabled(False)
+        # projet d'enregistrements d'oscilloscope (controller/project_controller.py)
+        self.actionOpenProject = self._action(
+            "Ouvrir un projet...", "Ouvrir un projet d'enregistrements d'oscilloscope "
+            "(.lfproj) : enregistrements, disposition des voies, balises",
+            icon=sp.SP_DirOpenIcon)
+        self.actionSaveProject = self._action(
+            "Enregistrer le projet", "Enregistrer la disposition des voies, les balises et "
+            "la liste des enregistrements (.lfproj)", icon=sp.SP_DialogSaveButton)
+        self.actionSaveProjectAs = self._action("Enregistrer le projet sous...",
+                                                "Enregistrer le projet dans un autre fichier")
+        self.actionNewProject = self._action(
+            "Nouveau projet", "Repartir d'un projet vide (l'enregistrement affiché reste "
+            "ouvert)")
+        self.actionAddBookmark = self._action(
+            "Nouvelle balise", "Balise : portion affichée et échelles des voies de "
+            "l'enregistrement d'oscilloscope (Ctrl+B)", "Ctrl+B")
+        self.actionAddBookmark.setEnabled(False)
         # répartition des voies analogiques par axe d'ordonnées (controller/y_axes.py)
         self.axisModeGroup = QtGui.QActionGroup(self)
         self.axisModeActions = {}
@@ -143,6 +162,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.menuRecent = menu.addMenu("Fichiers récents")
         menu.addActions([self.actionAddScopeChannels, self.actionAlignScope,
                          self.actionCloseScope, self.actionSaveBuffer])
+        menu.addSeparator()
+        menu.addActions([self.actionOpenProject, self.actionSaveProject,
+                         self.actionSaveProjectAs, self.actionNewProject,
+                         self.actionAddBookmark])
         menu.addSeparator()
         menu.addAction(self.actionQuit)
         menu = self.menuBar().addMenu("Acquisition")
@@ -216,10 +239,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.overviewgraph = pg.GraphicsLayoutWidget()
         self.overviewgraph.setFixedHeight(130)
         self.overviewgraph.hide()
+        # projet : enregistrements et balises, au-dessus de la vue d'ensemble
+        self.projectBar = ProjectBar()
+        self.projectBar.hide()
         graphs = QtWidgets.QWidget()
         column = QtWidgets.QVBoxLayout(graphs)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(2)
+        column.addWidget(self.projectBar)
         column.addWidget(self.overviewgraph)
         column.addWidget(self.graph_splitter)
         self.splitter.addWidget(graphs)

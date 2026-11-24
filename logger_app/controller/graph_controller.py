@@ -73,6 +73,7 @@ class LiveGraphController(QtCore.QObject):
         self.hold_scales = False
         self._main_fitted = False
         self._seen: dict[int, tuple] = {}
+        self._requested: dict[int, tuple] = {}     # plages imposées par set_y_ranges
         self._fitting = False
         # voie sélectionnée dans l'arborescence, mise en évidence (highlight)
         self.highlighted: tuple | None = None
@@ -188,7 +189,7 @@ class LiveGraphController(QtCore.QObject):
         for scale in self.scales:
             scale.remove()
         self.scales, self.groups, self._group_of, self._bounds = [], [], {}, {}
-        self._seen, self._main_fitted = {}, False
+        self._seen, self._main_fitted, self._requested = {}, False, {}
 
     def _remove_from_view(self, item, group: int):
         if group == 0:
@@ -344,6 +345,49 @@ class LiveGraphController(QtCore.QObject):
             if not scale.fitted or (scale.auto and not self.hold_scales):
                 scale.fit(self._bounds.get(g))
 
+    # ------------------------------------------------------------------ disposition
+    def y_ranges(self) -> dict[int, tuple[float, float]]:
+        """Plage verticale de l'axe de chaque voie analogique (projet, balise)."""
+        return {sig: tuple(self.analog_view(sig).viewRange()[1])
+                for group in self.groups for sig in group}
+
+    def set_y_ranges(self, ranges: dict[int, tuple[float, float]]):
+        """
+        Plages imposées aux axes (projet, balise) : {voie : (bas, haut)}, la première voie
+        d'un axe qui en a une donne sa plage. Ces axes sont tenus : l'ajustement
+        automatique ne les reprend pas (bouton « A » ou Échelle auto pour recadrer).
+        """
+        done = False
+        self._fitting = True                 # les autres échelles ne suivent pas
+        try:
+            for g, group in enumerate(self.groups):
+                sig = next((s for s in group if s in ranges), None)
+                if sig is None:
+                    continue
+                lo, hi = ranges[sig]
+                if not hi > lo:
+                    continue
+                view = self.analog_view(sig)
+                self._requested[g] = (lo, hi)
+                # limites de l'enregistrement précédent (ou d'avant les données) : levées,
+                # la prochaine trame pose les siennes
+                zoom.clear_y(view)
+                if g == 0:
+                    self.analog_plot.disableAutoRange(axis="y")
+                    self._main_fitted = True
+                else:
+                    scale = self.scales[g - 1]
+                    scale.auto, scale.fitted = False, True
+                view.setYRange(lo, hi, padding=0)
+                done = True
+        finally:
+            self._fitting = False
+        if done:
+            for scale in self.scales:
+                scale.store_relation()
+            self._place_snap_guides()
+            self.y_scales_changed.emit()
+
     # ------------------------------------------------------------------ voies calculées
     def set_math_engine(self, engine):
         self.math_engine = engine
@@ -397,10 +441,15 @@ class LiveGraphController(QtCore.QObject):
         for g, group in enumerate(self.groups):
             arrays = []
             if frame is not None:
-                cols = [j for j, s in enumerate(frame.analog_signals)
-                        if s in group and ("A", s) not in self.hidden]
+                in_group = [j for j, s in enumerate(frame.analog_signals) if s in group]
+                cols = [j for j in in_group if ("A", frame.analog_signals[j]) not in self.hidden]
                 if cols:
                     arrays.append(frame.analog[:, cols])
+                elif self.hold_scales and in_group:
+                    # échelles tenues, voies de l'axe toutes masquées : limites sur leurs
+                    # données (sinon l'échelle fixe de logger.m rognerait une plage choisie,
+                    # celle d'un projet ou d'une balise)
+                    arrays.append(frame.analog[:, in_group])
             if self._threshold_group == g:
                 arrays.append([self.threshold_line.value()])
             if g == 0 and (not self.auto_range or not arrays):   # échelle fixe de logger.m
@@ -415,6 +464,11 @@ class LiveGraphController(QtCore.QObject):
                 if self.hold_scales and frame is not None:   # stables d'une portion à l'autre
                     seen = self._seen.get(g, span)
                     span = self._seen[g] = (min(seen[0], span[0]), max(seen[1], span[1]))
+                if g in self._requested:
+                    # plage imposée (projet, balise) : tenue même sur un enregistrement
+                    # d'une autre amplitude
+                    lo, hi = self._requested[g]
+                    span = (min(span[0], lo), max(span[1], hi))
                 zoom.limit_y_free(view, *span)
         results = math_results if math_results is not None else (
             self.math_results() if frame is not None else {})

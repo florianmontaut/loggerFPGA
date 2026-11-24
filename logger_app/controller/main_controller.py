@@ -31,12 +31,15 @@ from controller.fft_controller import FFTController
 from controller.graph_controller import LiveGraphController
 from controller.math_controller import MathController
 from controller.pattern_controller import PatternController
+from controller.project_controller import ProjectController
 from controller.recent_controller import RecentFilesController
 from controller.scope_controller import ScopeController, is_scope_file
 from model.config import ConfigError, LoggerConfig
 from model.frame_buffer import MAX_CAPACITY
 from model.loader import RecordingError, load_recording
 from model.math_channels import definitions_from_config
+from model.project import EXTENSION as PROJECT_EXTENSION
+from model.project import is_project_file
 from view.main_window import MainWindow
 
 STATE_LABELS = {"IDLE": "Arrêté", "CONFIG": "Configuration", "WAIT_TRIG": "Armé",
@@ -111,8 +114,6 @@ class MainController(QtCore.QObject):
         # mémoire tampon des dernières trames, onglet Trames
         self.buffer_ctrl = BufferController(view, self.config_ctrl.cfg.buffer_frames,
                                             self._record_settings)
-        if confirm_quit:
-            view.close_guard = self.buffer_ctrl.confirm_quit
         # enregistrements longs d'oscilloscope (CSV Tektronix, HDF5)
         self.scope_ctrl = ScopeController(view, self.graph_ctrl)
         self.align_ctrl = AlignController(view, self.graph_ctrl, self.scope_ctrl)
@@ -131,6 +132,21 @@ class MainController(QtCore.QObject):
         self.graph_ctrl.redrawn.connect(self._on_redrawn_for_pattern)
 
         self._connect()
+        # projet d'enregistrements d'oscilloscope : disposition des voies, balises ;
+        # créé après _connect : il applique sa disposition une fois l'affichage configuré
+        self.project_ctrl = ProjectController(view, self.graph_ctrl, self.scope_ctrl,
+                                              self.tree_ctrl, self.math_ctrl,
+                                              lambda: self.recent_ctrl.last_dir)
+        self.project_ctrl.message.connect(view.show_message)
+        self.project_ctrl.saved.connect(lambda path: self.recent_ctrl.add("project", [path]))
+        self.project_ctrl.axis_mode_requested.connect(self._set_axis_mode)
+        view.actionOpenProject.triggered.connect(self.open_project_dialog)
+        view.actionSaveProject.triggered.connect(lambda: self.project_ctrl.save())
+        view.actionSaveProjectAs.triggered.connect(lambda: self.project_ctrl.save_as())
+        view.actionNewProject.triggered.connect(lambda: self.project_ctrl.new())
+        if confirm_quit:
+            view.close_guard = lambda: (self.project_ctrl.confirm_discard("quitter")
+                                        and self.buffer_ctrl.confirm_quit())
         self._apply_preview(self.config_ctrl.cfg)
         # fenêtres déportées de la session précédente, une fois la fenêtre principale ouverte
         QtCore.QTimer.singleShot(0, self.detach_ctrl.restore)
@@ -270,10 +286,19 @@ class MainController(QtCore.QObject):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self.view, "Ouvrir un enregistrement — un CSV par voie d'oscilloscope : "
             "Ctrl+clic pour les choisir ensemble", directory,
-            "Enregistrements (*.csv *.npz *.h5 *.hdf5);;Logger FPGA (*.csv *.npz);;"
-            "Oscilloscope : CSV Tektronix, HDF5 (*.csv *.h5 *.hdf5);;Tous les fichiers (*)")
+            f"Enregistrements (*.csv *.npz *.h5 *.hdf5 *{PROJECT_EXTENSION});;"
+            "Logger FPGA (*.csv *.npz);;"
+            "Oscilloscope : CSV Tektronix, HDF5 (*.csv *.h5 *.hdf5);;"
+            f"Projet (*{PROJECT_EXTENSION});;Tous les fichiers (*)")
         if paths:
             self.open_files(paths)
+
+    def open_project_dialog(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self.view, "Ouvrir un projet", self.recent_ctrl.last_dir,
+            f"Projet (*{PROJECT_EXTENSION});;Tous les fichiers (*)")
+        if path:
+            self.open_files([path])
 
     def open_files(self, paths: list[str]) -> bool:
         """
@@ -282,6 +307,12 @@ class MainController(QtCore.QObject):
         """
         if self.acq_ctrl.running:
             return False
+        if any(is_project_file(p) for p in paths):
+            if len(paths) > 1:
+                QtWidgets.QMessageBox.warning(self.view, "Ouvrir un projet",
+                                              "Ouvrir un seul projet à la fois.")
+                return False
+            return self.project_ctrl.open(paths[0])
         scope = [is_scope_file(p) for p in paths]
         if all(scope):
             if self.scope_ctrl.active:
@@ -328,6 +359,8 @@ class MainController(QtCore.QObject):
         return "add" if clicked is add else "replace" if clicked is replace else "cancel"
 
     def _set_axis_mode(self, mode: str):
+        if mode in self.view.axisModeActions:
+            self.view.axisModeActions[mode].setChecked(True)
         self.graph_ctrl.set_axis_mode(mode)
         if self.settings is not None:
             self.settings.setValue("display/y_axes", mode)

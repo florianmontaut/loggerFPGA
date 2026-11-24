@@ -85,6 +85,7 @@ logger_app/
 │   ├── loader.py                  relecture d'un enregistrement (.csv, .npz)
 │   ├── pattern.py                 export d'un motif : sélection, décimation, formats
 │   ├── scope_record.py            oscilloscope : import CSV Tektronix / HDF5 PicoScope -> HDF5, lecture par zoom
+│   ├── project.py                 projet d'enregistrements (.lfproj) : disposition des voies, balises
 │   ├── spectrum.py                FFT : fenêtres, amplitudes calibrées, moyennage, pics, THD
 │   └── measures.py                mesures entre deux curseurs (Δt, Δy, min, max, moyenne, efficace)
 ├── controller/
@@ -97,6 +98,7 @@ logger_app/
 │   ├── scope_controller.py        mode enregistrement long (vue d'ensemble, zoom, import)
 │   ├── y_axes.py                  axes d'ordonnées multiples (répartition des voies, échelles)
 │   ├── align_controller.py        recalage de voies dans le temps (poignée, lignes A / B)
+│   ├── project_controller.py      projet : disposition, passage d'un enregistrement à l'autre, balises
 │   ├── recent_controller.py       fichiers récents, dernier répertoire visité
 │   ├── pattern_controller.py      export d'un motif (zone, points marqués, copie)
 │   ├── math_controller.py         groupe « Voies calculées » (formules, état)
@@ -108,6 +110,7 @@ logger_app/
 ├── view/detached_window.py        fenêtre d'un graphique déporté
 ├── view/pattern_dialog.py         fenêtre « Exporter un motif »
 ├── view/align_panel.py            recalage : choix des voies, barre de réglage
+├── view/project_bar.py            barre du projet : enregistrements, vignettes des balises
 ├── ressources/pens.py             couleurs des voies (palette tab20 du GLviewer)
 ├── ressources/zoom.py             limites de zoom des graphiques
 ├── tools/fpga_simulator.py        simulateur du FPGA (UDP local)
@@ -604,6 +607,67 @@ HDF5_viewer ne tient pas compte de ce décalage (`mixed_timebase` vaut alors vra
 
 ![recalage des voies d'un PicoScope sur celles d'un Tektronix](docs/capture_recalage.png)
 
+### Projet : disposition des voies et balises
+
+Pour le post-traitement des enregistrements d'oscilloscope (.h5), un **projet**
+(fichier `.lfproj`) garde ce que l'on règle par-dessus les mesures, et permet de passer
+d'un enregistrement à l'autre en retrouvant exactement la même vue. Comme le projet du
+GLviewer, il ne contient pas les mesures : seulement le chemin des workspaces.
+
+*Fichier › Ouvrir un projet / Enregistrer le projet / Enregistrer le projet sous /
+Nouveau projet*. Un projet s'ouvre aussi par *Ouvrir un enregistrement* et par les
+fichiers récents.
+
+**Ce que garde le projet**
+* la liste de ses enregistrements, en chemins relatifs au projet : un dossier d'essais
+  déplacé ou copié avec son projet reste lisible (chemin absolu en secours) ;
+* la **disposition des voies** : plage verticale de l'axe de chaque voie (gain et offset),
+  voies masquées, voie mise en évidence, répartition des axes, portion affichée ;
+* les **voies calculées** ;
+* les **balises**.
+
+Disposition et balises sont rangées par **nom de voie** : elles s'appliquent à un autre
+enregistrement qui n'a pas ses voies dans le même ordre. Une voie absente est ignorée ;
+une voie sans disposition garde l'échelle automatique (signalé dans la barre d'état). Le
+décalage dans le temps d'une voie (recalage) reste dans le workspace .h5 : il touche aux
+données, pas à la façon de les regarder.
+
+**Barre du projet** (au-dessus de la vue d'ensemble, avec un enregistrement ouvert)
+
+```
+Projet : essais.lfproj *   [essai_A.h5 ▾] Retirer  |  Balises : [▭ 1] [▭ 2 · Commutation]  + Balise
+```
+
+* **Liste des enregistrements** : en choisir un l'ouvre avec la disposition et la portion
+  de temps de celui qui était affiché. Tout enregistrement d'oscilloscope ouvert entre
+  dans la liste ; *Retirer* l'en enlève (le fichier n'est pas touché).
+* Un enregistrement ouvert autrement (*Fichier*, fichiers récents) prend la disposition
+  du projet si celui-ci est enregistré. Dans un projet *sans titre*, il garde l'échelle
+  automatique : rien n'est imposé à qui n'utilise pas les projets.
+* Rouvrir l'enregistrement qu'on vient de fermer (*Ajouter des voies*, recalage) lui rend
+  sa disposition.
+
+**Balises** : une zone d'intérêt, c'est-à-dire une portion de temps et les échelles des
+voies.
+* *+ Balise* (ou Ctrl+B) enregistre la vue affichée.
+* Un clic sur sa vignette (ou Ctrl+1 à Ctrl+9) l'affiche. L'info-bulle donne son
+  grossissement et sa place (« ×50 à 20.6% de l'enregistrement ») et une vignette plus
+  grande.
+* Clic droit : *Renommer*, *Remplacer par la vue actuelle*, *Supprimer*.
+* Les temps sont en secondes : sur deux enregistrements déclenchés de la même façon, une
+  balise montre le même événement. Une balise hors de l'enregistrement affiché est
+  refusée.
+* Une balise ne change pas les voies masquées, seulement les échelles et la portion.
+* La vignette est dessinée à partir des courbes, en traits épais : une capture d'écran
+  réduite ne garderait rien des traits d'un pixel.
+
+**Enregistrer** : quitter, ouvrir un autre projet ou en commencer un nouveau demande
+d'enregistrer un projet modifié (disposition, balises ou liste des enregistrements). Un
+projet *sans titre* sans balise ne pose pas la question. L'écriture passe par un fichier
+voisin remplacé ensuite (`qtsocle.settings`) : une coupure n'abîme pas le projet.
+
+![projet : enregistrements et balises au-dessus de la vue d'ensemble](docs/capture_projet.png)
+
 ### Voies calculées (MATH)
 
 Comme les voies MATH d'un oscilloscope : des formules sur les voies de chaque trame,
@@ -804,7 +868,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-138 tests, plus celui de l'exécutable avec `--exe` (le moteur de formules a les siens, dans son paquet) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, exports PicoScope et bases de temps différentes, axes d'ordonnées multiples, recalage dans le temps, voie mise en évidence, alignement des zéros, démarrage par `main.py` et journal des erreurs, acquisition complète contre le
+150 tests, plus celui de l'exécutable avec `--exe` (le moteur de formules a les siens, dans son paquet) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, exports PicoScope et bases de temps différentes, axes d'ordonnées multiples, recalage dans le temps, voie mise en évidence, alignement des zéros, projets et balises, démarrage par `main.py` et journal des erreurs, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes

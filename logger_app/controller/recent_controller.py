@@ -18,7 +18,7 @@ Fichiers récents et dernier répertoire visité (comme le menu « Recent files 
     - liste et répertoire conservés d'une session à l'autre (QSettings) ; sans QSettings
       (tests), seulement pour la session.
 
-Entrée : {"kind": "logger" | "scope" | "config", "paths": [chemins]}. Pour un
+Entrée : {"kind": "logger" | "scope" | "config" | "project", "paths": [chemins]}. Pour un
 enregistrement d'oscilloscope, c'est le workspace .h5 qui est retenu : il contient les
 voies ajoutées et se rouvre sans nouvelle conversion.
 """
@@ -31,7 +31,8 @@ from typing import Callable
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 MAX_RECENT = 10
-KINDS = {"logger": "logger", "scope": "oscilloscope", "config": "configuration"}
+KINDS = {"logger": "logger", "scope": "oscilloscope", "config": "configuration",
+         "project": "projet"}
 KEY_FILES = "recent/files"
 KEY_DIR = "recent/last_dir"
 
