@@ -97,6 +97,7 @@ logger_app/
 │   ├── fft_controller.py          spectre temps réel et réglages FFT
 │   ├── scope_controller.py        mode enregistrement long (vue d'ensemble, zoom, import)
 │   ├── y_axes.py                  axes d'ordonnées multiples (répartition des voies, échelles)
+│   ├── scale_controller.py        groupe « Échelle de l'axe » : plage, graduations, grille d'un axe
 │   ├── align_controller.py        recalage de voies dans le temps (poignée, lignes A / B)
 │   ├── project_controller.py      projet : disposition, passage d'un enregistrement à l'autre, balises
 │   ├── recent_controller.py       fichiers récents, dernier répertoire visité
@@ -567,6 +568,47 @@ deux zones, ou au bas ou au haut du graphique, dès qu'il s'en approche à moins
 
 ![zéro d'un axe collé sur une limite de zone](docs/capture_zeros_alignes.png)
 
+### Échelle d'un axe (enregistrements d'oscilloscope)
+
+En plus de la molette et du glissement sur un axe, le groupe **Échelle de l'axe**, en tête
+de l'arbre des paramètres, règle l'axe d'une voie par saisie. Choisir une voie dans
+l'arborescence choisit son axe.
+
+| Réglage | Effet |
+|---|---|
+| **Axe** | axe réglé : ses voies, son unité et son côté |
+| **Automatique** | axe ajusté à ses courbes (portion affichée) ; décoché, l'axe garde sa plage |
+| **Min / Max** | plage, dans l'unité de l'axe (préfixes acceptés : 500m, 2k) ; saisir une borne tient l'axe |
+| **Graduation** | pas des graduations principales (0 : automatique) |
+| **Sous-graduations** | intervalles entre deux graduations principales (0 : 5), avec un pas choisi |
+| **Grille** | lignes horizontales aux graduations de cet axe |
+
+* **Saisie des bornes** : un Min supérieur au Max reste en attente de l'autre borne. On
+  peut donc passer de 0–20 à 30–40 en commençant par le Min.
+* **Échelle tenue** : une échelle saisie n'est reprise ni par une nouvelle portion relue
+  (zoom en temps), ni par l'ajustement automatique. *Échelle auto*, le bouton « A » ou la
+  case *Automatique* recadrent.
+* **Mise à jour de l'arbre** : l'arbre suit l'axe quand il change à la souris (molette ou
+  glissement sur l'axe, déplacement du graphique qui fait suivre les autres axes).
+* **Grille** : seulement sur l'axe principal par défaut ; toutes ensemble, les grilles
+  sont illisibles.
+* **Graduations au dézoom** : au-delà de 200 graduations dans la plage affichée, le pas
+  redevient automatique, puis le pas choisi revient en rezoomant. pyqtgraph dessinerait
+  sinon des milliers de graduations.
+* **Saisie et alignement des zéros** : une plage saisie ne passe pas par le collage des
+  zéros, qui reste actif pour le glissement sur l'axe. Les autres axes suivent toujours
+  le déplacement du graphique.
+* **Réglages retrouvés** : ils sont rangés par axe, c'est-à-dire par voie seule, par
+  unité ou pour l'axe unique. Ils reviennent quand on change la répartition des axes
+  puis qu'on revient à la précédente. Graduations et grille passent aussi d'un
+  enregistrement à l'autre et sont gardées dans le projet ; les plages le sont déjà,
+  par voie, dans sa disposition.
+* **Logger en temps réel** : le groupe est masqué et les axes gardent leur réglage par
+  défaut. Une première étape sur les enregistrements, le temps réel ayant ses propres
+  mécanismes d'échelle (échelle fixe de `logger.m`, ajustement à chaque trame).
+
+![échelle d'un axe : plage, graduations et grille de l'axe de la voie A](docs/capture_echelle.png)
+
 ### Voie mise en évidence
 
 La voie sélectionnée dans l'arborescence est mise en évidence sur son graphique (comme
@@ -624,6 +666,7 @@ fichiers récents.
 * la **disposition des voies** : plage verticale de l'axe de chaque voie (gain et offset),
   voies masquées, voie mise en évidence, répartition des axes, portion affichée ;
 * les **voies calculées** ;
+* les **graduations et la grille** choisies pour chaque axe (*Échelle de l'axe*) ;
 * les **balises**.
 
 Disposition et balises sont rangées par **nom de voie** : elles s'appliquent à un autre
@@ -868,7 +911,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-150 tests, plus celui de l'exécutable avec `--exe` (le moteur de formules a les siens, dans son paquet) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, exports PicoScope et bases de temps différentes, axes d'ordonnées multiples, recalage dans le temps, voie mise en évidence, alignement des zéros, projets et balises, démarrage par `main.py` et journal des erreurs, acquisition complète contre le
+151 tests, plus celui de l'exécutable avec `--exe` (le moteur de formules a les siens, dans son paquet) : protocole (octet par octet contre `logger.m`), FFT, curseurs, écran déporté, enregistrement, mémoire tampon, voies calculées, relecture des enregistrements, enregistrements d'oscilloscope, fichiers récents, FFT sur zone, limites de zoom, export de motifs, exports PicoScope et bases de temps différentes, axes d'ordonnées multiples, recalage dans le temps, voie mise en évidence, alignement des zéros, projets et balises, échelle d'un axe, démarrage par `main.py` et journal des erreurs, acquisition complète contre le
 simulateur (trigger auto, seuil, pertes, arrêt, enregistrement), interface hors écran.
 
 ## 6. Points à valider sur la carte et pistes

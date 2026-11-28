@@ -20,7 +20,9 @@ def _project(folder):
                    math_channels=[{"name": "P", "formula": "[CH1]*[CH2]", "unit": "W",
                                    "enabled": True}],
                    bookmarks=[Bookmark("Commutation", [1.2e-4, 1.6e-4],
-                                       {"CH1": [-50.0, 700.0]}, "iVBOR")])
+                                       {"CH1": [-50.0, 700.0]}, "iVBOR")],
+                   axes={"voie:CH1": {"major": 100.0, "minor": 4, "grid": True},
+                         "unité:V": {"major": 0.0, "minor": 0, "grid": False}})
 
 
 def test_round_trip(tmp_path):
@@ -37,6 +39,7 @@ def test_round_trip(tmp_path):
     assert back.view == [-1e-3, 2e-3] and back.axis_mode == "channel"
     assert back.math_channels == project.math_channels
     assert back.bookmarks == project.bookmarks
+    assert back.axes == project.axes
     assert is_project_file(str(path)) and not is_project_file("A.h5")
 
 

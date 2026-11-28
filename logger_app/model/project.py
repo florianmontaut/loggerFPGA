@@ -12,6 +12,7 @@ des workspaces HDF5, sans les mesures (comme le projet .json du GLviewer).
       "channels": {"CH1": {"y": [lo, hi], "visible": true}, ...},
       "highlighted": "CH1",
       "math_channels": [{"name", "formula", "unit", "enabled"}],
+      "axes": {"voie:CH1": {"major": 100.0, "minor": 4, "grid": true}},   // graduations
       "bookmarks": [{"name": "Balise 1", "x": [t0, t1], "y": {"CH1": [lo, hi]},
                      "thumbnail": "<PNG en base64>"}]
     }
@@ -110,6 +111,8 @@ class Project:
     highlighted: str | None = None
     math_channels: list[dict] = field(default_factory=list)
     bookmarks: list[Bookmark] = field(default_factory=list)
+    # graduations et grille par clé d'axe (controller/scale_controller.py)
+    axes: dict[str, dict] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ enregistrements
     def add_record(self, path: str) -> bool:
@@ -157,7 +160,10 @@ class Project:
                 "axis_mode": self.axis_mode, "channels": channels,
                 "highlighted": self.highlighted,
                 "math_channels": [dict(d) for d in self.math_channels],
-                "bookmarks": [b.to_dict() for b in self.bookmarks]}
+                "bookmarks": [b.to_dict() for b in self.bookmarks],
+                "axes": {key: {"major": _num(v.get("major") or 0.0),
+                               "minor": int(v.get("minor") or 0), "grid": v.get("grid")}
+                         for key, v in self.axes.items()}}
 
     @classmethod
     def from_dict(cls, data: dict, base_dir: str) -> "Project":
@@ -191,6 +197,17 @@ class Project:
                 entry["y"] = span
             channels[str(name)] = entry
         highlighted = data.get("highlighted")
+        axes = {}
+        for key, value in dict(data.get("axes") or {}).items():
+            if not isinstance(value, dict):
+                continue
+            try:
+                major, minor = abs(float(value.get("major") or 0.0)), int(value.get("minor") or 0)
+            except (TypeError, ValueError):
+                continue
+            grid = value.get("grid")
+            axes[str(key)] = {"major": major, "minor": max(0, min(minor, 20)),
+                              "grid": None if grid is None else bool(grid)}
         return cls(records=records, current=current,
                    view=_span(data.get("view")) if data.get("view") else None,
                    axis_mode=str(data.get("axis_mode") or "auto"), channels=channels,
@@ -198,7 +215,8 @@ class Project:
                    math_channels=[dict(d) for d in data.get("math_channels") or []
                                   if isinstance(d, dict)],
                    bookmarks=[Bookmark.from_dict(b) for b in data.get("bookmarks") or []
-                              if isinstance(b, dict)])
+                              if isinstance(b, dict)],
+                   axes=axes)
 
     def save(self, path: str):
         """Écriture sûre (fichier voisin puis remplacement, qtsocle.settings)."""

@@ -33,6 +33,7 @@ from controller.math_controller import MathController
 from controller.pattern_controller import PatternController
 from controller.project_controller import ProjectController
 from controller.recent_controller import RecentFilesController
+from controller.scale_controller import ScaleController
 from controller.scope_controller import ScopeController, is_scope_file
 from model.config import ConfigError, LoggerConfig
 from model.frame_buffer import MAX_CAPACITY
@@ -84,6 +85,8 @@ class MainController(QtCore.QObject):
         self.tree_ctrl = ChannelTreeController(view.treechannels)
         self.graph_ctrl = LiveGraphController(view.analoggraph, view.logicgraph, view.mathgraph)
         self.cursor_ctrl = CursorController(self.graph_ctrl, view.configtree)
+        # échelle de l'axe d'une voie (enregistrement d'oscilloscope), en tête de l'arbre
+        self.scale_ctrl = ScaleController(self.graph_ctrl, view.configtree)
         # réglages de l'interface conservés d'une session à l'autre (fenêtres déportées,
         # axe des fréquences de la FFT)
         self.settings = QtCore.QSettings("LoggerFPGA", "logger_app") if remember else None
@@ -136,7 +139,8 @@ class MainController(QtCore.QObject):
         # créé après _connect : il applique sa disposition une fois l'affichage configuré
         self.project_ctrl = ProjectController(view, self.graph_ctrl, self.scope_ctrl,
                                               self.tree_ctrl, self.math_ctrl,
-                                              lambda: self.recent_ctrl.last_dir)
+                                              lambda: self.recent_ctrl.last_dir,
+                                              self.scale_ctrl)
         self.project_ctrl.message.connect(view.show_message)
         self.project_ctrl.saved.connect(lambda path: self.recent_ctrl.add("project", [path]))
         self.project_ctrl.axis_mode_requested.connect(self._set_axis_mode)
@@ -218,6 +222,7 @@ class MainController(QtCore.QObject):
         self.graph_ctrl.fps_changed.connect(lambda fps: v.fpsLabel.setText(f"{fps:.0f} img/s"))
         self.tree_ctrl.visibility_changed.connect(self.graph_ctrl.set_visible)
         self.tree_ctrl.current_changed.connect(self.graph_ctrl.highlight)
+        self.tree_ctrl.channel_selected.connect(self.scale_ctrl.select_channel)
 
         # voies calculées : appliquées tout de suite, gardées dans la configuration
         self.math_ctrl.changed.connect(self._on_math_changed)

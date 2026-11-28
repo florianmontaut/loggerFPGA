@@ -2027,3 +2027,96 @@ def test_project_file_errors(setup, tmp_path, monkeypatch):
     assert ctrl.open_files([str(gone)])
     assert "introuvable" in window.statusBar().currentMessage()
     assert not ctrl.scope_ctrl.active
+
+
+# ------------------------------------------------------------------ échelle d'un axe
+
+def test_axis_scale_tree(setup, tmp_path, monkeypatch):
+    """Arbre « Échelle de l'axe » : plage, automatique, graduations, grille."""
+    import json
+    qapp, sim, window, ctrl = setup
+    graph, scale, tree = ctrl.graph_ctrl, ctrl.scale_ctrl, ctrl.tree_ctrl
+    p = scale.p
+    assert not scale.enabled and not scale.params.opts["visible"]   # logger : masqué
+    scope = _two_scopes(qapp, ctrl, tmp_path, monkeypatch)           # CH1, CH2, A, B
+    assert scale.enabled and scale.params.opts["visible"]
+    top = window.configtree.topLevelItem(0)
+    assert top.param is scale.params                                 # en tête de l'arbre
+    assert len(p("Axe").opts["limits"]) == 4
+    # voie choisie dans l'arborescence : son axe ; valeurs de l'axe dans l'arbre
+    tree.view.setCurrentIndex(tree.items[("A", 2)][0].index())
+    assert scale.group == 2 and p("Axe").value() == 2
+    view = graph.axis_view(2)
+    assert [p("Min").value(), p("Max").value()] == pytest.approx(view.viewRange()[1])
+    assert p("Automatique").value() and p("Min").opts["suffix"] == "V"
+    fitted = view.viewRange()[1]
+    # grille : axe principal seul par défaut
+    assert graph.left_axis.grid == graph.GRID_ALPHA
+    assert all(s.axis.grid is False for s in graph.scales)
+    # Min / Max saisis : axe tenu, relation avec les autres axes mise à jour
+    scale.set_scale(2, Min=-5.0, Max=20.0)
+    assert view.viewRange()[1] == pytest.approx([-5.0, 20.0])
+    assert not p("Automatique").value() and not graph.axis_auto(2)
+    others = [graph.axis_view(g).viewRange()[1] for g in (0, 1, 3)]
+    p("Min").setValue(30.0)                     # min >= max : en attente de l'autre borne
+    assert view.viewRange()[1] == pytest.approx([-5.0, 20.0]) and p("Min").value() == 30.0
+    p("Max").setValue(40.0)                     # l'autre borne : plage appliquée
+    assert view.viewRange()[1] == pytest.approx([30.0, 40.0])
+    scale.set_scale(2, Min=-5.0, Max=20.0)      # Min d'abord : -5 < 40, puis Max
+    assert view.viewRange()[1] == pytest.approx([-5.0, 20.0])
+    # une nouvelle portion relue (zoom en temps) ne change pas l'échelle saisie
+    graph.analog_plot.setXRange(-5e-6, 5e-6, padding=0)
+    assert wait(qapp, lambda: graph.frame.n_samples < 5000)
+    wait(qapp, lambda: False, 0.2)
+    assert view.viewRange()[1] == pytest.approx([-5.0, 20.0])
+    assert [graph.axis_view(g).viewRange()[1] for g in (0, 1, 3)] == others
+    # graduations : pas et sous-graduations ; trop de graduations au dézoom : automatique
+    scale.set_scale(2, Graduation=5.0, Sous_graduations=5)
+    axis = graph.axis_item(2)
+    assert axis._tickSpacing == [(5.0, 0.0), (1.0, 0.0)]
+    for _ in range(60):
+        view.wheelEvent(_WheelEvent(view, -120), axis=1)
+    lo, hi = view.viewRange()[1]
+    assert (hi - lo) / 5.0 > graph.MAX_TICKS and axis._tickSpacing is None
+    # molette sur l'axe : arbre à jour
+    assert [p("Min").value(), p("Max").value()] == pytest.approx([lo, hi])
+    scale.set_scale(2, Min=-5.0, Max=20.0)
+    assert axis._tickSpacing == [(5.0, 0.0), (1.0, 0.0)]
+    # grille de cet axe
+    scale.set_scale(2, Grille=True)
+    assert axis.grid == graph.GRID_ALPHA
+    window.grab().save(str(SHOTS / "logger_echelle.png"))
+    # déplacement du graphique : les axes suivent, l'arbre aussi
+    graph.analog_plot.vb.sigRangeChangedManually.emit([True, True])
+    m0, m1 = graph.analog_plot.vb.viewRange()[1]
+    graph.analog_plot.vb.setYRange(m0 + 0.25 * (m1 - m0), m1 + 0.25 * (m1 - m0), padding=0)
+    lo, hi = view.viewRange()[1]
+    assert lo == pytest.approx(-5.0 + 0.25 * 25.0) and hi == pytest.approx(20.0 + 6.25)
+    assert [p("Min").value(), p("Max").value()] == pytest.approx([lo, hi])
+    assert not graph.axis_auto(0)                 # déplacé : axe principal tenu
+    # autre répartition puis retour : réglages retrouvés par voie
+    scale.set_scale(2, Min=-5.0, Max=20.0)
+    window.axisModeActions["unit"].trigger()
+    assert len(graph.groups) == 2 and graph.axis_key(1) == "unité:V"
+    assert graph.axis_item(1)._tickSpacing is None
+    window.axisModeActions["auto"].trigger()
+    assert graph.axis_view(2).viewRange()[1] == pytest.approx([-5.0, 20.0])
+    assert graph.axis_item(2)._tickSpacing == [(5.0, 0.0), (1.0, 0.0)]
+    assert graph.axis_item(2).grid == graph.GRID_ALPHA
+    # Automatique : de nouveau ajusté aux courbes
+    scale.set_scale(2, Automatique=True)
+    assert graph.axis_auto(2)
+    lo, hi = graph.axis_view(2).viewRange()[1]       # portion affichée : A vaut 15 V
+    assert lo < 15 < hi and hi - lo < 1 and p("Automatique").value()
+    # projet : graduations et grille enregistrées par clé d'axe
+    target = tmp_path / "echelle.lfproj"
+    monkeypatch.setattr(ctrl.project_ctrl, "ask_save_path", lambda default: str(target))
+    window.actionSaveProject.trigger()
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert data["axes"]["voie:A"] == {"major": 5.0, "minor": 5, "grid": True}
+    # retour au logger : groupe masqué, axe principal par défaut
+    scope.close()
+    assert not scale.enabled and not scale.params.opts["visible"]
+    assert graph.left_axis._tickSpacing is None and graph.left_axis.grid == graph.GRID_ALPHA
+    monkeypatch.setattr(ctrl.project_ctrl, "ask_discard", lambda action: "discard")
+    window.actionNewProject.trigger()

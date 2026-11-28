@@ -49,13 +49,15 @@ class ProjectController(QtCore.QObject):
     saved = QtCore.pyqtSignal(str)              # projet enregistré ou ouvert (récents)
     axis_mode_requested = QtCore.pyqtSignal(str)
 
-    def __init__(self, view, graph_ctrl, scope_ctrl, tree_ctrl, math_ctrl, last_dir):
+    def __init__(self, view, graph_ctrl, scope_ctrl, tree_ctrl, math_ctrl, last_dir,
+                 scale_ctrl=None):
         super().__init__()
         self.view = view
         self.graph = graph_ctrl
         self.scope = scope_ctrl
         self.tree = tree_ctrl
         self.math = math_ctrl
+        self.scale = scale_ctrl                 # graduations et grille des axes
         self.last_dir = last_dir                # callable() -> dossier des boîtes de fichiers
         self.project = Project()
         self.path: str | None = None            # fichier du projet, None : sans titre
@@ -151,6 +153,8 @@ class ProjectController(QtCore.QObject):
         else:
             self.project.axis_mode = self.graph.axis_mode
         self.project.math_channels = [d.to_dict() for d in self.math.definitions()]
+        if self.scale is not None:
+            self.project.axes = self.scale.display_settings()
 
     def _project_layout(self) -> dict:
         """Disposition du projet (toutes les voies connues), à appliquer à l'ouverture."""
@@ -392,6 +396,8 @@ class ProjectController(QtCore.QObject):
         if project.math_channels:
             self.math.set_definitions([MathDefinition.from_dict(d)
                                        for d in project.math_channels])
+        if self.scale is not None and project.axes:
+            self.scale.set_display_settings(project.axes)
         missing = [p for p in project.records if not os.path.exists(p)]
         target = project.current if project.current and os.path.exists(project.current) \
             else next((p for p in project.records if os.path.exists(p)), None)
