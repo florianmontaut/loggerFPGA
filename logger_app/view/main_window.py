@@ -211,6 +211,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tree_tabs.addTab(self.treechannels, "Voies")
         self.tree_tabs.addTab(self._init_frames_tab(), "Trames")
 
+        # réglages communs au logger et aux enregistrements : échelle de l'axe, voies
+        # calculées, curseurs, FFT
         self.configtree = ptree.ParameterTree(showHeader=False)
         self.left_splitter.addWidget(self.tree_tabs)
         self.left_splitter.addWidget(self.configtree)
@@ -250,9 +252,24 @@ class MainWindow(QtWidgets.QMainWindow):
         column.addWidget(self.overviewgraph)
         column.addWidget(self.graph_splitter)
         self.splitter.addWidget(graphs)
+        # réglages du logger en temps réel (liaison, voies, échantillonnage, trigger,
+        # acquisition, mémoire tampon, enregistrement, description des voies), à droite
+        self.loggerpanel = QtWidgets.QWidget()
+        right = QtWidgets.QVBoxLayout(self.loggerpanel)
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(2)
+        title = QtWidgets.QLabel("Logger en temps réel")
+        title.setStyleSheet("font-weight: bold; padding: 4px;")
+        right.addWidget(title)
+        self.loggertree = ptree.ParameterTree(showHeader=False)
+        right.addWidget(self.loggertree)
+        self.loggerpanel.setMinimumWidth(300)
+        self.splitter.addWidget(self.loggerpanel)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 4)
+        self.splitter.setStretchFactor(2, 1)
         self.splitter.setCollapsible(0, False)
+        self.splitter.setSizes([340, 760, 300])
         self.setCentralWidget(self.splitter)
 
     def _init_frames_tab(self) -> QtWidgets.QWidget:

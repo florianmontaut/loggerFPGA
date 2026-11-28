@@ -91,7 +91,7 @@ logger_app/
 ├── controller/
 │   ├── udp_worker.py              AcquisitionWorker(QThread) : boucle de logger.m
 │   ├── acquisition_controller.py  démarrage / arrêt / relance du worker
-│   ├── config_controller.py       ParameterTree <-> LoggerConfig (voie de seuil, grandeurs dérivées)
+│   ├── config_controller.py       panneau « Logger en temps réel » <-> LoggerConfig (voie de seuil, grandeurs dérivées)
 │   ├── channel_tree_controller.py arborescence des voies (visibilité, valeur sous le curseur)
 │   ├── graph_controller.py        graphique temps réel (analogique + logique, seuil, curseur)
 │   ├── fft_controller.py          spectre temps réel et réglages FFT
@@ -168,6 +168,16 @@ son étiquette de version, pour que le logger ne change pas quand le socle évol
 travailler sur le socle en même temps, depuis une copie locale : `pip install -e
 ../../qtsocle`. Le moteur des voies calculées,
 [formules](https://github.com/florianmontaut/formules), s'installe de la même façon.
+
+### Disposition de la fenêtre
+
+| Gauche | Centre | Droite : *Logger en temps réel* |
+|---|---|---|
+| Arborescence des voies, onglet Trames | Barre du projet, vue d'ensemble (enregistrement d'oscilloscope) | Liaison, Voies, Échantillonnage |
+| Réglages communs au logger et aux enregistrements : *Échelle de l'axe* (enregistrements), *Curseurs*, *Voies calculées*, *FFT* | Graphiques (analogique, voies calculées, logique, FFT), déportables | Trigger, Acquisition, Mémoire tampon, Enregistrement, Description des voies |
+
+Le panneau de droite ne sert qu'à la liaison avec le logger : il se réduit ou s'élargit
+par son séparateur.
 
 ### Exécutable
 
@@ -374,7 +384,7 @@ fichier d'origine.
   écrit à côté du fichier. Sans lui, ils sont reconstitués depuis l'en-tête du CSV : les
   voies sont alors renumérotées 0, 1, 2… et l'heure de capture est inconnue.
 * **Affichage** : graphiques et arborescence prennent la configuration du fichier.
-  L'arbre des paramètres garde celle de l'acquisition, qui n'est pas modifiée par
+  Le panneau *Logger en temps réel* garde celle de l'acquisition, qui n'est pas modifiée par
   l'ouverture d'un fichier.
 * **Mémoire tampon** : le fichier la remplace. Si elle contient des trames non
   enregistrées, l'application propose de les enregistrer d'abord (question posée

@@ -238,6 +238,7 @@ def test_detach_fft_window(setup):
     assert wait(qapp, lambda: not ctrl.acq_ctrl.running)
     fft_window.resize(640, 360)
     fft_window.grab().save(str(SHOTS / "logger_fft_detached.png"))
+    window.grab().save(str(SHOTS / "logger_main_fft_detached.png"))
 
     # FFT désactivée : fenêtre masquée ; réactivée : fenêtre réaffichée
     window.actionFFT.setChecked(False)

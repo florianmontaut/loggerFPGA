@@ -81,7 +81,8 @@ class MainController(QtCore.QObject):
         if cfg is None:
             cfg = self._load_last_config() if remember else LoggerConfig()
 
-        self.config_ctrl = ConfigController(view.configtree, resolve_record_dir(cfg))
+        # réglages du logger en temps réel : arbre de droite ; communs : arbre de gauche
+        self.config_ctrl = ConfigController(view.loggertree, resolve_record_dir(cfg))
         self.tree_ctrl = ChannelTreeController(view.treechannels)
         self.graph_ctrl = LiveGraphController(view.analoggraph, view.logicgraph, view.mathgraph)
         self.cursor_ctrl = CursorController(self.graph_ctrl, view.configtree)
