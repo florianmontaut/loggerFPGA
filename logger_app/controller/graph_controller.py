@@ -75,6 +75,7 @@ class LiveGraphController(QtCore.QObject):
         self._seen: dict[int, tuple] = {}
         self._requested: dict[int, tuple] = {}     # plages imposées par set_y_ranges
         self._fitting = False
+        self._main_auto = True                     # axe principal ajusté à ses courbes
         # voie sélectionnée dans l'arborescence, mise en évidence (highlight)
         self.highlighted: tuple | None = None
         self._highlight_curve = None
@@ -190,6 +191,7 @@ class LiveGraphController(QtCore.QObject):
             scale.remove()
         self.scales, self.groups, self._group_of, self._bounds = [], [], {}, {}
         self._seen, self._main_fitted, self._requested = {}, False, {}
+        self._main_auto = True
 
     def _remove_from_view(self, item, group: int):
         if group == 0:
@@ -312,8 +314,11 @@ class LiveGraphController(QtCore.QObject):
         (m0, m1), (s0, s1) = self.analog_plot.vb.viewRange()[1], view.viewRange()[1]
         return s0 + (y - m0) * (s1 - s0) / (m1 - m0) if m1 != m0 else y
 
-    def _on_main_manual(self, *_):
+    def _on_main_manual(self, mask=None):
         """Zoom / déplacement du graphique : échelles figées, elles suivent la principale."""
+        if mask is not None and not mask[1]:
+            return                          # molette dans la zone de tracé : temps seul
+        self._main_auto = False
         if not self.left_axis.direct and not self.analog_plot.vb.autoRangeEnabled()[1]:
             for scale in self.scales:
                 scale.auto = False
@@ -321,7 +326,7 @@ class LiveGraphController(QtCore.QObject):
     def _on_auto_button(self):
         """Bouton « A » du graphique : tous les axes de nouveau ajustés à leurs courbes."""
         if self.auto_range:
-            self._main_fitted = False
+            self._main_fitted, self._main_auto, self._requested = False, True, {}
             for scale in self.scales:
                 scale.auto, scale.fitted = True, False
             if self.hold_scales:
@@ -357,24 +362,29 @@ class LiveGraphController(QtCore.QObject):
         d'un axe qui en a une donne sa plage. Ces axes sont tenus : l'ajustement
         automatique ne les reprend pas (bouton « A » ou Échelle auto pour recadrer).
         """
+        by_axis = {}
+        for g, group in enumerate(self.groups):
+            sig = next((s for s in group if s in ranges), None)
+            if sig is not None:
+                by_axis[g] = ranges[sig]
+        self._set_axis_ranges(by_axis)
+
+    def _set_axis_ranges(self, ranges: dict[int, tuple[float, float]]):
+        """Plages imposées par axe ({indice d'axe : (bas, haut)}), axes tenus."""
         done = False
         self._fitting = True                 # les autres échelles ne suivent pas
         try:
-            for g, group in enumerate(self.groups):
-                sig = next((s for s in group if s in ranges), None)
-                if sig is None:
+            for g, (lo, hi) in ranges.items():
+                if not hi > lo or not 0 <= g < len(self.groups):
                     continue
-                lo, hi = ranges[sig]
-                if not hi > lo:
-                    continue
-                view = self.analog_view(sig)
+                view = self.axis_view(g)
                 self._requested[g] = (lo, hi)
                 # limites de l'enregistrement précédent (ou d'avant les données) : levées,
                 # la prochaine trame pose les siennes
                 zoom.clear_y(view)
                 if g == 0:
                     self.analog_plot.disableAutoRange(axis="y")
-                    self._main_fitted = True
+                    self._main_fitted, self._main_auto = True, False
                 else:
                     scale = self.scales[g - 1]
                     scale.auto, scale.fitted = False, True
@@ -387,6 +397,113 @@ class LiveGraphController(QtCore.QObject):
                 scale.store_relation()
             self._place_snap_guides()
             self.y_scales_changed.emit()
+
+    # ------------------------------------------------------------------ réglage d'un axe
+    GRID_ALPHA = 76                     # grille des axes : celle de showGrid(alpha=0.3)
+    MAX_TICKS = 200                     # graduations fixes au-delà : pas automatique
+
+    def axis_of(self, sig: int | None) -> int | None:
+        """Indice de l'axe de la voie analogique `sig` (0 : axe principal)."""
+        return self._group_of.get(sig)
+
+    def axis_item(self, g: int) -> pg.AxisItem:
+        return self.left_axis if g == 0 else self.scales[g - 1].axis
+
+    def axis_view(self, g: int) -> pg.ViewBox:
+        return self.analog_plot.vb if g == 0 else self.scales[g - 1].vb
+
+    def axis_unit(self, g: int) -> str:
+        units = {self.cfg.unit(s) for s in self.groups[g]} if self.cfg else set()
+        return units.pop() if len(units) == 1 else ""
+
+    def axis_key(self, g: int) -> str:
+        """
+        Clé stable d'un axe, pour retrouver ses réglages quand les axes sont recréés
+        (autre répartition, autre enregistrement) : voie seule, unité, ou axe unique.
+        """
+        group = self.groups[g]
+        if len(self.groups) == 1:
+            return "unique"
+        if len(group) == 1:
+            return f"voie:{self.cfg.analog_name(group[0])}"
+        unit = self.axis_unit(g)
+        if unit:
+            return f"unité:{unit}"
+        return "voies:" + "+".join(self.cfg.analog_name(s) for s in group)
+
+    def axis_label(self, g: int) -> str:
+        """Texte de l'axe dans la liste du réglage : voies et côté."""
+        names = ", ".join(self.cfg.analog_name(s) for s in self.groups[g][:3])
+        if len(self.groups[g]) > 3:
+            names += "…"
+        unit = self.axis_unit(g)
+        side = "gauche" if g == 0 or self.scales[g - 1].side == "left" else "droite"
+        return f"{names}{f' ({unit})' if unit else ''} — {side}"
+
+    def axis_auto(self, g: int) -> bool:
+        """Axe ajusté à ses courbes (pas d'échelle choisie à la main)."""
+        if g == 0:
+            if not self.hold_scales:
+                return self.analog_plot.vb.autoRangeEnabled()[1] and self.auto_range
+            return self._main_auto
+        return self.scales[g - 1].auto
+
+    def set_axis_auto(self, g: int, enabled: bool):
+        """Automatique : l'axe est de nouveau ajusté à ses courbes ; sinon, tenu tel quel."""
+        if not 0 <= g < len(self.groups):
+            return
+        if not enabled:
+            if g == 0:
+                self._main_auto = False
+                if not self.hold_scales:
+                    self.analog_plot.disableAutoRange(axis="y")
+            else:
+                self.scales[g - 1].auto = False
+            return
+        self._requested.pop(g, None)
+        if g == 0:
+            self._main_auto, self._main_fitted = True, False
+            if not self.hold_scales and self.auto_range:
+                self.analog_plot.enableAutoRange(axis="y")
+        else:
+            scale = self.scales[g - 1]
+            scale.auto, scale.fitted = True, False
+        self._update_y_limits()
+        self._fit_scales()
+        for scale in self.scales:
+            scale.store_relation()
+        self.y_scales_changed.emit()
+
+    def set_axis_range(self, g: int, lo: float, hi: float):
+        """Plage saisie : l'axe est tenu (ni l'ajustement ni une trame ne la changent)."""
+        self._set_axis_ranges({g: (lo, hi)})
+
+    def set_axis_ticks(self, g: int, major: float = 0.0, minor: int = 0):
+        """
+        Pas des graduations principales (0 : automatique) et nombre d'intervalles entre
+        deux d'entre elles (0 : 5). Au-delà de MAX_TICKS graduations dans la plage
+        affichée (fort dézoom), retour provisoire au pas automatique : pyqtgraph
+        dessinerait sinon des milliers de graduations.
+        """
+        axis = self.axis_item(g)
+        axis.tick_spec = (major, minor)
+        lo, hi = self.axis_view(g).viewRange()[1]
+        levels = None
+        if major > 0 and (hi - lo) / major <= self.MAX_TICKS:
+            levels = [(major, 0.0), (major / (minor if minor > 0 else 5), 0.0)]
+        if levels != getattr(axis, "_tickSpacing", None):     # axe redessiné si changé
+            axis.setTickSpacing(levels=levels)
+
+    def refresh_ticks(self):
+        """Graduations fixes revues après un changement de plage (seuil MAX_TICKS)."""
+        for g in range(len(self.groups)):
+            spec = getattr(self.axis_item(g), "tick_spec", None)
+            if spec and spec[0] > 0:
+                self.set_axis_ticks(g, *spec)
+
+    def set_axis_grid(self, g: int, shown: bool):
+        """Lignes horizontales aux graduations de l'axe (couvrent sa ViewBox liée)."""
+        self.axis_item(g).setGrid(self.GRID_ALPHA if shown else False)
 
     # ------------------------------------------------------------------ voies calculées
     def set_math_engine(self, engine):
@@ -421,7 +538,9 @@ class LiveGraphController(QtCore.QObject):
 
     def set_auto_range(self, enabled: bool):
         self.auto_range = enabled
-        self._main_fitted = False
+        self._main_fitted, self._main_auto = False, enabled
+        if enabled:
+            self._requested = {}
         for scale in self.scales:
             scale.auto, scale.fitted = enabled, False
         self._update_y_limits()

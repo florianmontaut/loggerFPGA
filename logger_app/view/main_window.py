@@ -211,6 +211,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tree_tabs.addTab(self.treechannels, "Voies")
         self.tree_tabs.addTab(self._init_frames_tab(), "Trames")
 
+        # réglages communs au logger et aux enregistrements : échelle de l'axe, voies
+        # calculées, curseurs, FFT
         self.configtree = ptree.ParameterTree(showHeader=False)
         self.left_splitter.addWidget(self.tree_tabs)
         self.left_splitter.addWidget(self.configtree)
@@ -250,10 +252,42 @@ class MainWindow(QtWidgets.QMainWindow):
         column.addWidget(self.overviewgraph)
         column.addWidget(self.graph_splitter)
         self.splitter.addWidget(graphs)
+        # réglages du logger en temps réel (liaison, voies, échantillonnage, trigger,
+        # acquisition, mémoire tampon, enregistrement, description des voies), à droite
+        self.loggerpanel = QtWidgets.QWidget()
+        right = QtWidgets.QVBoxLayout(self.loggerpanel)
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(2)
+        title = QtWidgets.QLabel("Logger en temps réel")
+        title.setStyleSheet("font-weight: bold; padding: 4px;")
+        right.addWidget(title)
+        self.loggertree = ptree.ParameterTree(showHeader=False)
+        right.addWidget(self.loggertree)
+        self.loggerpanel.setMinimumWidth(300)
+        self.splitter.addWidget(self.loggerpanel)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 4)
+        self.splitter.setStretchFactor(2, 1)
         self.splitter.setCollapsible(0, False)
+        self.splitter.setSizes([340, 760, 300])
         self.setCentralWidget(self.splitter)
+
+    def show_logger_panel(self, shown: bool):
+        """
+        Panneau « Logger en temps réel » montré ou masqué (enregistrement d'oscilloscope) :
+        sa largeur va au graphique, le panneau de gauche garde la sienne.
+        """
+        if shown == self.loggerpanel.isVisibleTo(self):
+            return
+        sizes = self.splitter.sizes()
+        if shown:
+            right = getattr(self, "_logger_width", 300)
+            self.loggerpanel.show()
+            self.splitter.setSizes([sizes[0], max(sizes[1] - right, 100), right])
+        else:
+            self._logger_width = sizes[2] or 300
+            self.loggerpanel.hide()
+            self.splitter.setSizes([sizes[0], sizes[1] + sizes[2], 0])
 
     def _init_frames_tab(self) -> QtWidgets.QWidget:
         """
