@@ -757,7 +757,10 @@ def test_scope_record_mode(setup, tmp_path):
     window.actionFFT.setChecked(True)
     ctrl.math_ctrl.add()
     ctrl.math_ctrl._groups()[0].child("Formule").setValue("[CH1]*[CH2]")
+    left_width = window.splitter.sizes()[0]
     _open_scope(qapp, ctrl, [path])
+    assert not window.loggerpanel.isVisible()        # réglages du temps réel masqués
+    assert abs(window.splitter.sizes()[0] - left_width) <= 2   # place rendue au graphique
     assert (tmp_path / "dpo.h5").exists()
     assert window.overviewgraph.isVisible() and window.actionCloseScope.isEnabled()
     root = ctrl.tree_ctrl.model.item(0)
@@ -801,6 +804,8 @@ def test_scope_record_mode(setup, tmp_path):
     # fermeture : retour à l'affichage du logger
     window.actionCloseScope.trigger()
     assert not scope.active and not window.overviewgraph.isVisible()
+    assert window.loggerpanel.isVisible() and window.splitter.sizes()[2] > 200
+    assert abs(window.splitter.sizes()[0] - left_width) <= 2
     assert ctrl.graph_ctrl.cfg.signals == [1, 4, 6, 15]
 
 
@@ -2050,6 +2055,9 @@ def test_axis_scale_tree(setup, tmp_path, monkeypatch):
     view = graph.axis_view(2)
     assert [p("Min").value(), p("Max").value()] == pytest.approx(view.viewRange()[1])
     assert p("Automatique").value() and p("Min").opts["suffix"] == "V"
+    scale.select_axis(0)                          # CH1 : sans unité, pas de suffixe
+    assert p("Min").opts["suffix"] == ""
+    scale.select_axis(2)
     fitted = view.viewRange()[1]
     # grille : axe principal seul par défaut
     assert graph.left_axis.grid == graph.GRID_ALPHA

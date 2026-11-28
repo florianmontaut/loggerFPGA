@@ -176,8 +176,9 @@ travailler sur le socle en même temps, depuis une copie locale : `pip install -
 | Arborescence des voies, onglet Trames | Barre du projet, vue d'ensemble (enregistrement d'oscilloscope) | Liaison, Voies, Échantillonnage |
 | Réglages communs au logger et aux enregistrements : *Échelle de l'axe* (enregistrements), *Curseurs*, *Voies calculées*, *FFT* | Graphiques (analogique, voies calculées, logique, FFT), déportables | Trigger, Acquisition, Mémoire tampon, Enregistrement, Description des voies |
 
-Le panneau de droite ne sert qu'à la liaison avec le logger : il se réduit ou s'élargit
-par son séparateur.
+Le panneau de droite ne sert qu'à la liaison avec le logger : il est masqué pendant
+qu'un enregistrement d'oscilloscope est affiché (sa largeur revient au graphique) et
+revient au retour au logger. Il se réduit ou s'élargit par son séparateur.
 
 ### Exécutable
 

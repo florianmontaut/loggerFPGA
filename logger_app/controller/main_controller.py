@@ -199,6 +199,10 @@ class MainController(QtCore.QObject):
         self.scope_ctrl.loaded.connect(
             lambda h5, sources: self.recent_ctrl.add("scope", [h5], visited=sources[0]))
         self.scope_ctrl.opened.connect(self._on_scope_opened)
+        # réglages du logger en temps réel inutiles pour un enregistrement : place rendue
+        # au graphique (closing : émis à toute fermeture, même sans retour au logger)
+        self.scope_ctrl.opened.connect(lambda _cfg: v.show_logger_panel(False))
+        self.scope_ctrl.closing.connect(lambda: v.show_logger_panel(True))
         self.scope_ctrl.closed.connect(self._on_scope_closed)
         self.scope_ctrl.display_frame.connect(lambda frame: self._display_frame(frame, "scope"))
         self.scope_ctrl.message.connect(v.show_message)

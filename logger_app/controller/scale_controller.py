@@ -157,7 +157,7 @@ class ScaleController(QtCore.QObject):
                 labels = {graph.axis_label(k): k for k in range(len(graph.groups))}
                 self.p("Axe").setLimits(labels)
                 self.p("Axe").setValue(g)
-                unit = graph.axis_unit(g) or None
+                unit = graph.axis_unit(g)          # "" sans unité (None s'afficherait)
                 for name in ("Min", "Max", "Graduation"):
                     self.p(name).setOpts(suffix=unit)
                 settings = self._settings(g)

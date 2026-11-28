@@ -272,6 +272,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.splitter.setSizes([340, 760, 300])
         self.setCentralWidget(self.splitter)
 
+    def show_logger_panel(self, shown: bool):
+        """
+        Panneau « Logger en temps réel » montré ou masqué (enregistrement d'oscilloscope) :
+        sa largeur va au graphique, le panneau de gauche garde la sienne.
+        """
+        if shown == self.loggerpanel.isVisibleTo(self):
+            return
+        sizes = self.splitter.sizes()
+        if shown:
+            right = getattr(self, "_logger_width", 300)
+            self.loggerpanel.show()
+            self.splitter.setSizes([sizes[0], max(sizes[1] - right, 100), right])
+        else:
+            self._logger_width = sizes[2] or 300
+            self.loggerpanel.hide()
+            self.splitter.setSizes([sizes[0], sizes[1] + sizes[2], 0])
+
     def _init_frames_tab(self) -> QtWidgets.QWidget:
         """
         Onglet « Trames » : trames de la mémoire tampon (vignette de la première voie,
